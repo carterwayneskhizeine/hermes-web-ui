@@ -11,6 +11,4 @@ export async function initGatewayManager(): Promise<void> {
   gatewayManager = new GatewayManager(activeProfile)
 
   await gatewayManager.detectAllOnStartup()
-  await gatewayManager.startAll()
-  console.log("startall")
 }

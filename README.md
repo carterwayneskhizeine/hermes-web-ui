@@ -238,7 +238,7 @@ npm install
 npm run dev
 ```
 
-- Frontend: http://localhost:5173
+- Frontend: http://localhost:8649
 - BFF Server: http://localhost:8648 (proxies to Hermes on 8642)
 
 ```bash

@@ -49,10 +49,11 @@ const execFileAsync = promisify(execFile)
 const HERMES_BASE = resolve(homedir(), '.hermes')
 const HERMES_BIN = process.env.HERMES_BIN?.trim() || 'hermes'
 
-// WSL / Docker 没有 systemd 或 launchd，需要用 "gateway run" 代替 "gateway start"
+// WSL / Docker / Windows 没有 systemd 或 launchd，需要用 "gateway run" 代替 "gateway start"
 const isWsl = existsSync('/proc/version') && readFileSync('/proc/version', 'utf-8').toLowerCase().includes('microsoft')
 const isDocker = existsSync('/.dockerenv')
-const needsRunMode = isWsl || isDocker
+const isWindows = process.platform === 'win32'
+const needsRunMode = isWsl || isDocker || isWindows
 
 // ============================
 // 类型定义
@@ -342,6 +343,7 @@ export class GatewayManager {
       const { stdout } = await execFileAsync(HERMES_BIN, ['profile', 'list'], {
         timeout: 10000,
         windowsHide: true,
+        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       })
       const profiles: string[] = []
       for (const line of stdout.trim().split('\n')) {
@@ -417,7 +419,12 @@ export class GatewayManager {
           detached: true,
           stdio: 'ignore',
           windowsHide: true,
+          shell: isWindows,
           env,
+        })
+        child.on('error', (err) => {
+          logger.warn(err, 'Failed to spawn gateway for profile "%s"', name)
+          reject(err)
         })
         child.unref()
 
@@ -506,8 +513,12 @@ export class GatewayManager {
         pid = this.readPidFile(name) ?? undefined
       }
       if (pid) {
-        try { process.kill(-pid, 'SIGTERM') } catch {
-          try { process.kill(pid, 'SIGTERM') } catch { }
+        if (isWindows) {
+          try { execFileAsync('taskkill', ['/PID', String(pid), '/F']).catch(() => {}) } catch { }
+        } else {
+          try { process.kill(-pid, 'SIGTERM') } catch {
+            try { process.kill(pid, 'SIGTERM') } catch { }
+          }
         }
       }
     }

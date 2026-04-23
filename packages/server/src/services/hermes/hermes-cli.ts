@@ -5,7 +5,14 @@ import { logger } from '../logger'
 
 const execFileAsync = promisify(execFile)
 
-const execOpts = { windowsHide: true }
+const execOpts = {
+  windowsHide: true,
+  env: {
+    ...process.env,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+  },
+}
 const isDocker = existsSync('/.dockerenv')
 
 function resolveHermesBin(): string {

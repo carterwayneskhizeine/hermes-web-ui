@@ -43,12 +43,26 @@ try {
 // ─── Shell detection ────────────────────────────────────────────
 
 function findShell(): string {
+  if (process.platform === 'win32') {
+    const winCandidates = [
+      process.env.SHELL,
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+      process.env.ComSpec,
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      'C:\\Windows\\System32\\cmd.exe',
+    ].filter(Boolean) as string[]
+    for (const shell of winCandidates) {
+      if (existsSync(shell)) return shell
+    }
+    return 'cmd.exe'
+  }
+
   const candidates = [
     process.env.SHELL,
     '/bin/zsh',
     '/bin/bash',
-    process.platform === 'win32' ? 'powershell.exe' : null,
-    process.platform === 'win32' ? 'cmd.exe' : null,
+    '/usr/bin/bash',
   ].filter(Boolean) as string[]
 
   for (const shell of candidates) {
