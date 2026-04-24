@@ -1,4 +1,4 @@
-# Logs
+h# Logs
 logs
 *.log
 npm-debug.log*
@@ -31,3 +31,4 @@ hermes-dependencies.md
 *.sln
 *.sw?
 .superpowers/
+.claude/settings.json

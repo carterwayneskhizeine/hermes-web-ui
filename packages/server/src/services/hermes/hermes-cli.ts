@@ -75,7 +75,7 @@ export interface HermesSessionFull {
 }
 
 function parseSessionExport(stdout: string): HermesSessionFull[] {
-  const lines = stdout.trim().split('\n').filter(Boolean)
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean)
   const sessions: HermesSessionFull[] = []
   for (const line of lines) {
     try {
@@ -317,7 +317,7 @@ export async function listLogFiles(): Promise<LogFileInfo[]> {
       ...execOpts,
     })
     const files: LogFileInfo[] = []
-    const lines = stdout.trim().split('\n').filter(l => l.includes('.log'))
+    const lines = stdout.trim().split(/\r?\n/).filter(l => l.includes('.log'))
     for (const line of lines) {
       const match = line.match(/^\s+(\S+)\s+([\d.]+\w+)\s+(.+)$/)
       if (match) {
@@ -394,12 +394,12 @@ export async function listProfiles(): Promise<HermesProfile[]> {
       ...execOpts,
     })
 
-    const lines = stdout.trim().split('\n').filter(Boolean)
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean)
     const profiles: HermesProfile[] = []
 
-    // Skip header lines (starts with " Profile" or " ─")
-    for (const line of lines) {
-      if (line.startsWith(' Profile') || line.match(/^ ─/)) continue
+    for (const raw of lines) {
+      const line = raw.replace(/\r$/, '')
+      if (line.match(/^\s*(Profile|─)/)) continue
 
       const match = line.match(/^\s+(◆)?(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(.*)$/)
       if (match) {
@@ -431,7 +431,7 @@ export async function getProfile(name: string): Promise<HermesProfileDetail> {
     })
 
     const result: Record<string, string> = {}
-    for (const line of stdout.trim().split('\n')) {
+    for (const line of stdout.trim().split(/\r?\n/)) {
       const match = line.match(/^(\w[\w\s]*?):\s+(.+)$/)
       if (match) {
         result[match[1].trim().toLowerCase().replace(/\s+/g, '_')] = match[2].trim()

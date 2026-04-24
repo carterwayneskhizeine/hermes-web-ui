@@ -346,8 +346,9 @@ export class GatewayManager {
         env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       })
       const profiles: string[] = []
-      for (const line of stdout.trim().split('\n')) {
-        if (line.startsWith(' Profile') || line.match(/^ ─/)) continue
+      for (const raw of stdout.trim().split(/\r?\n/)) {
+        const line = raw.replace(/\r$/, '')
+        if (line.match(/^\s*(Profile|─)/)) continue
         const match = line.match(/^\s+(?:◆)?(\S+)\s{2,}/)
         if (match) profiles.push(match[1])
       }
