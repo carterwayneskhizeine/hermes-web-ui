@@ -3,6 +3,6 @@
   "ext": "ts,tsx",
   "exec": "ts-node --project packages/server/tsconfig.json packages/server/src/index.ts",
   "env": {
-    "HERMES_BIN": "D:\\Code\\hermes-agent-windows-R\\venv\\Scripts\\hermes.exe"
+    "HERMES_BIN": "D:\\Code\\goldie-fork\\hermes-agent\\venv\\Scripts\\hermes.exe"
   }
 }
