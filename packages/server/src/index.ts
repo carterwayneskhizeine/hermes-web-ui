@@ -15,7 +15,9 @@ import { setupTerminalWebSocket } from './routes/hermes/terminal'
 import { startVersionCheck } from './routes/health'
 import { registerRoutes } from './routes'
 import { setGroupChatServer } from './routes/hermes/group-chat'
+import { setChatRunServer } from './routes/hermes/chat-run'
 import { GroupChatServer } from './services/hermes/group-chat'
+import { ChatRunSocket } from './services/hermes/chat-run-socket'
 import { logger } from './services/logger'
 
 // Injected by esbuild at build time; fallback to reading package.json in dev mode
@@ -46,11 +48,18 @@ export async function bootstrap() {
 
   await initGatewayManager()
   console.log('[bootstrap] gateway manager initialized')
+  await new Promise(resolve => setTimeout(resolve, 1000))
+  // Initialize all web-ui SQLite tables
+  const { initAllStores } = await import('./db/hermes/init')
+  // Wait 1 second before initializing stores to ensure all resources are ready
+  initAllStores()
+  await new Promise(resolve => setTimeout(resolve, 1000))
+  console.log('[bootstrap] all stores initialized')
 
-  // Initialize web-ui SQLite tables
-  const { initUsageStore } = await import('./db/hermes/usage-store')
-  initUsageStore()
-  console.log('[bootstrap] usage store initialized')
+  // Sync Hermes sessions from all profiles (only if local DB is empty)
+  const { syncAllHermesSessionsOnStartup } = await import('./services/hermes/session-sync')
+  await syncAllHermesSessionsOnStartup()
+  console.log('[bootstrap] Hermes session sync completed')
 
   app.use(cors({ origin: config.corsOrigins }))
   app.use(bodyParser())
@@ -91,6 +100,18 @@ export async function bootstrap() {
   const groupChatServer = new GroupChatServer(server)
   setGroupChatServer(groupChatServer)
   groupChatServer.setGatewayManager(getGatewayManagerInstance())
+
+  // Chat run Socket.IO — shares the same Server instance, just adds /chat-run namespace
+  const chatRunServer = new ChatRunSocket(groupChatServer.getIO(), getGatewayManagerInstance())
+  setChatRunServer(chatRunServer)
+  chatRunServer.init()
+
+  // Session deleter — periodically drain pending session deletes
+  const { SessionDeleter } = await import('./services/hermes/session-deleter')
+  const sessionDeleter = SessionDeleter.getInstance()
+  const activeProfile = process.env.PROFILE || 'default'
+  sessionDeleter.start(activeProfile)
+  console.log('[bootstrap] session deleter started, profile=%s', activeProfile)
 
   // Catch-all: destroy upgrade requests not handled by terminal or Socket.IO
   server.on('upgrade', (req: any, socket: any) => {

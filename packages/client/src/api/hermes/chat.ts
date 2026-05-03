@@ -1,14 +1,19 @@
+import { io, type Socket } from 'socket.io-client'
 import { request, getBaseUrlValue, getApiKey } from '../client'
+
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; name: string; path: string; media_type: string }
+  | { type: 'file'; name: string; path: string; media_type?: string }
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
-  content: string
+  content: string | ContentBlock[]
 }
 
 export interface StartRunRequest {
-  input: string | ChatMessage[]
+  input: string | ContentBlock[]
   instructions?: string
-  conversation_history?: ChatMessage[]
   session_id?: string
   model?: string
 }
@@ -38,70 +43,411 @@ export interface RunEvent {
     output_tokens: number
     total_tokens: number
   }
+  /** session_id tag added by server for client-side filtering */
+  session_id?: string
 }
 
-export async function startRun(body: StartRunRequest): Promise<StartRunResponse> {
-  const headers: Record<string, string> = {}
-  if (body.session_id) {
-    headers['X-Hermes-Session-Id'] = body.session_id
+// ============================
+// Socket.IO chat run connection
+// ============================
+
+let chatRunSocket: Socket | null = null
+let globalListenersRegistered = false
+
+/**
+ * Session event handlers map
+ * Maps session_id to event handling functions for isolating concurrent session streams
+ */
+const sessionEventHandlers = new Map<string, {
+  onMessageDelta: (event: RunEvent) => void
+  onReasoningDelta: (event: RunEvent) => void
+  onThinkingDelta: (event: RunEvent) => void
+  onReasoningAvailable: (event: RunEvent) => void
+  onToolStarted: (event: RunEvent) => void
+  onToolCompleted: (event: RunEvent) => void
+  onRunStarted: (event: RunEvent) => void
+  onRunCompleted: (event: RunEvent) => void
+  onRunFailed: (event: RunEvent) => void
+  onCompressionStarted: (event: RunEvent) => void
+  onCompressionCompleted: (event: RunEvent) => void
+  onUsageUpdated: (event: RunEvent) => void
+}>()
+
+/**
+ * Global message.delta event handler
+ * Distributes events to appropriate session based on session_id
+ */
+function globalMessageDeltaHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onMessageDelta) {
+    handlers.onMessageDelta(event)
   }
-  return request<StartRunResponse>('/api/hermes/v1/runs', {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers,
-  })
 }
 
-export function streamRunEvents(
-  runId: string,
+/**
+ * Global reasoning.delta event handler
+ */
+function globalReasoningDeltaHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onReasoningDelta) {
+    handlers.onReasoningDelta(event)
+  }
+}
+
+/**
+ * Global thinking.delta event handler (alias for reasoning.delta)
+ */
+function globalThinkingDeltaHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onThinkingDelta) {
+    handlers.onThinkingDelta(event)
+  }
+}
+
+/**
+ * Global reasoning.available event handler
+ */
+function globalReasoningAvailableHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onReasoningAvailable) {
+    handlers.onReasoningAvailable(event)
+  }
+}
+
+/**
+ * Global tool.started event handler
+ */
+function globalToolStartedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onToolStarted) {
+    handlers.onToolStarted(event)
+  }
+}
+
+/**
+ * Global tool.completed event handler
+ */
+function globalToolCompletedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onToolCompleted) {
+    handlers.onToolCompleted(event)
+  }
+}
+
+/**
+ * Global run.started event handler
+ */
+function globalRunStartedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onRunStarted) {
+    handlers.onRunStarted(event)
+  }
+}
+
+/**
+ * Global run.completed event handler
+ */
+function globalRunCompletedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onRunCompleted) {
+    handlers.onRunCompleted(event)
+  }
+
+  // Auto-cleanup session handlers on completion
+  sessionEventHandlers.delete(sid)
+}
+
+/**
+ * Global run.failed event handler
+ */
+function globalRunFailedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onRunFailed) {
+    handlers.onRunFailed(event)
+  }
+
+  // Auto-cleanup session handlers on failure
+  sessionEventHandlers.delete(sid)
+}
+
+/**
+ * Global compression.started event handler
+ */
+function globalCompressionStartedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onCompressionStarted) {
+    handlers.onCompressionStarted(event)
+  }
+}
+
+/**
+ * Global compression.completed event handler
+ */
+function globalCompressionCompletedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onCompressionCompleted) {
+    handlers.onCompressionCompleted(event)
+  }
+}
+
+/**
+ * Global usage.updated event handler
+ */
+function globalUsageUpdatedHandler(event: RunEvent): void {
+  const sid = event.session_id
+  if (!sid) return
+
+  const handlers = sessionEventHandlers.get(sid)
+  if (handlers?.onUsageUpdated) {
+    handlers.onUsageUpdated(event)
+  }
+}
+
+/**
+ * Register event handlers for a session
+ * @param sessionId - Session ID
+ * @param handlers - Event handling functions
+ * @returns Cleanup function to unregister handlers
+ */
+export function registerSessionHandlers(
+  sessionId: string,
+  handlers: {
+    onMessageDelta: (event: RunEvent) => void
+    onReasoningDelta: (event: RunEvent) => void
+    onThinkingDelta: (event: RunEvent) => void
+    onReasoningAvailable: (event: RunEvent) => void
+    onToolStarted: (event: RunEvent) => void
+    onToolCompleted: (event: RunEvent) => void
+    onRunStarted: (event: RunEvent) => void
+    onRunCompleted: (event: RunEvent) => void
+    onRunFailed: (event: RunEvent) => void
+    onCompressionStarted: (event: RunEvent) => void
+    onCompressionCompleted: (event: RunEvent) => void
+    onUsageUpdated: (event: RunEvent) => void
+  }
+): () => void {
+  sessionEventHandlers.set(sessionId, handlers)
+
+  // Return cleanup function
+  return () => {
+    sessionEventHandlers.delete(sessionId)
+  }
+}
+
+/**
+ * Unregister event handlers for a session
+ * @param sessionId - Session ID
+ */
+export function unregisterSessionHandlers(sessionId: string): void {
+  sessionEventHandlers.delete(sessionId)
+}
+
+export function getChatRunSocket(): Socket | null {
+  return chatRunSocket
+}
+
+export function connectChatRun(): Socket {
+  if (chatRunSocket?.connected) return chatRunSocket
+
+  // Clean up old socket to prevent duplicate event listeners
+  if (chatRunSocket) {
+    chatRunSocket.removeAllListeners()
+    chatRunSocket.disconnect()
+    globalListenersRegistered = false
+  }
+
+  const baseUrl = getBaseUrlValue()
+  const token = getApiKey()
+  const profile = localStorage.getItem('hermes_active_profile_name') || 'default'
+
+  chatRunSocket = io(`${baseUrl}/chat-run`, {
+    auth: { token },
+    query: { profile },
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 10000,
+  })
+
+  // Register global listeners only once per socket connection
+  if (!globalListenersRegistered) {
+    // Message events
+    chatRunSocket.on('message.delta', globalMessageDeltaHandler)
+    chatRunSocket.on('reasoning.delta', globalReasoningDeltaHandler)
+    chatRunSocket.on('thinking.delta', globalThinkingDeltaHandler)
+    chatRunSocket.on('reasoning.available', globalReasoningAvailableHandler)
+
+    // Tool events
+    chatRunSocket.on('tool.started', globalToolStartedHandler)
+    chatRunSocket.on('tool.completed', globalToolCompletedHandler)
+
+    // Run lifecycle events
+    chatRunSocket.on('run.started', globalRunStartedHandler)
+    chatRunSocket.on('run.failed', globalRunFailedHandler)
+    chatRunSocket.on('run.completed', globalRunCompletedHandler)
+
+    // Compression events
+    chatRunSocket.on('compression.started', globalCompressionStartedHandler)
+    chatRunSocket.on('compression.completed', globalCompressionCompletedHandler)
+
+    // Usage events
+    chatRunSocket.on('usage.updated', globalUsageUpdatedHandler)
+
+    globalListenersRegistered = true
+  }
+
+  return chatRunSocket
+}
+
+export function disconnectChatRun(): void {
+  if (chatRunSocket) {
+    chatRunSocket.disconnect()
+    chatRunSocket = null
+    globalListenersRegistered = false
+    sessionEventHandlers.clear()
+  }
+}
+
+/**
+ * Start a chat run via Socket.IO and stream events back.
+ * Returns an AbortController-compatible handle for cancellation.
+ */
+/**
+ * Resume a session via Socket.IO. Returns messages, working status, and events.
+ */
+export function resumeSession(
+  sessionId: string,
+  onResumed: (data: { session_id: string; messages: any[]; isWorking: boolean; events: any[]; inputTokens?: number; outputTokens?: number }) => void,
+): Socket {
+  const socket = connectChatRun()
+
+  socket.once('resumed', onResumed)
+  socket.emit('resume', { session_id: sessionId })
+
+  return socket
+}
+
+export function startRunViaSocket(
+  body: StartRunRequest,
   onEvent: (event: RunEvent) => void,
   onDone: () => void,
   onError: (err: Error) => void,
-) {
-  const baseUrl = getBaseUrlValue()
-  const token = getApiKey()
-  const profile = localStorage.getItem('hermes_active_profile_name')
-  const params = new URLSearchParams()
-  if (token) params.set('token', token)
-  if (profile && profile !== 'default') params.set('profile', profile)
-  const qs = params.toString()
-  const url = `${baseUrl}/api/hermes/v1/runs/${runId}/events${qs ? `?${qs}` : ''}`
+  onStarted?: (runId: string) => void,
+): { abort: () => void } {
+  const sid = body.session_id
+  if (!sid) {
+    throw new Error('session_id is required for startRunViaSocket')
+  }
 
   let closed = false
-  const source = new EventSource(url)
 
-  source.onmessage = (e) => {
-    if (closed) return
-    try {
-      const parsed = JSON.parse(e.data)
-      onEvent(parsed)
-
-      if (parsed.event === 'run.completed' || parsed.event === 'run.failed') {
-        closed = true
-        source.close()
-        onDone()
-      }
-    } catch {
-      onEvent({ event: 'message', delta: e.data })
-    }
+  // Define event handlers for this session
+  const handlers = {
+    onMessageDelta: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onReasoningDelta: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onThinkingDelta: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onReasoningAvailable: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onToolStarted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onToolCompleted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onRunStarted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+      onStarted?.(evt.run_id || '')
+    },
+    onRunCompleted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+      closed = true
+      onDone()
+    },
+    onRunFailed: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+      closed = true
+      onError(new Error(evt.error || 'Run failed'))
+    },
+    onCompressionStarted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onCompressionCompleted: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
+    onUsageUpdated: (evt: RunEvent) => {
+      if (closed) return
+      onEvent(evt)
+    },
   }
 
-  source.onerror = () => {
-    if (closed) return
-    closed = true
-    source.close()
-    onError(new Error('SSE connection error'))
-  }
+  // Register handlers in the global session map
+  sessionEventHandlers.set(sid, handlers)
 
-  // Return AbortController-compatible object
+  // Emit run request
+  const socket = connectChatRun()
+  socket.emit('run', body)
+
   return {
     abort: () => {
       if (!closed) {
         closed = true
-        source.close()
+        sessionEventHandlers.delete(sid)
+        socket.emit('abort', { session_id: sid })
       }
     },
-  } as unknown as AbortController
+  }
 }
 
 export async function fetchModels(): Promise<{ data: Array<{ id: string }> }> {
