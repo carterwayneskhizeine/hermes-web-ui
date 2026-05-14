@@ -7,10 +7,48 @@ import { SessionDeleter } from '../../services/hermes/session-deleter'
 import { getGatewayManagerInstance } from '../../services/gateway-bootstrap'
 import { logger } from '../../services/logger'
 import { smartCloneCleanup } from '../../services/hermes/profile-credentials'
+import { detectHermesHome } from '../../services/hermes/hermes-path'
+
+function profileExistsForManualSwitch(name: string): boolean {
+  const base = detectHermesHome()
+  if (!name || name === 'default') return true
+  return existsSync(join(base, 'profiles', name, 'config.yaml')) || existsSync(join(base, 'profiles', name))
+}
+
+async function useProfileWithFallback(name: string): Promise<string> {
+  try {
+    return await hermesCli.useProfile(name)
+  } catch (err: any) {
+    if (!profileExistsForManualSwitch(name)) throw err
+
+    const base = detectHermesHome()
+    writeFileSync(join(base, 'active_profile'), `${name}\n`, 'utf-8')
+    logger.warn(err, '[switchProfile] hermes profile use failed; wrote active_profile directly for existing profile "%s"', name)
+    return `Switched to profile ${name}`
+  }
+}
 
 export async function list(ctx: any) {
   try {
     const profiles = await hermesCli.listProfiles()
+
+    // Override active flag from the authoritative source (active_profile file)
+    // CLI output may be stale, but the file is written by hermes profile use
+    const { getActiveProfileName } = await import('../../services/hermes/hermes-profile')
+    const activeProfileName = getActiveProfileName()
+
+    // Check if CLI's active flag matches the file (warn if inconsistent)
+    const cliActive = profiles.find(p => p.active)
+    if (cliActive?.name !== activeProfileName) {
+      logger.warn('[listProfiles] CLI active flag (%s) differs from active_profile file (%s) - using file as authoritative source',
+        cliActive?.name || 'none', activeProfileName)
+    }
+
+    // Fix the active flag based on the actual active_profile file
+    profiles.forEach(p => {
+      p.active = (p.name === activeProfileName)
+    })
+
     ctx.body = { profiles }
   } catch (err: any) {
     ctx.status = 500
@@ -141,16 +179,53 @@ export async function switchProfile(ctx: any) {
     return
   }
   try {
-    const output = await hermesCli.useProfile(name)
-    await new Promise(r => setTimeout(r, 1000))
+    const output = await useProfileWithFallback(name)
+
+    // Verify the active_profile file immediately (Hermes CLI writes synchronously)
+    // Quick verification with 2 retries to handle edge cases (filesystem delays, concurrency)
+    const { getActiveProfileName } = await import('../../services/hermes/hermes-profile')
+    let actualActive = getActiveProfileName()
+
+    // Quick retry (max 2 times, 100ms delay each)
+    for (let i = 0; i < 2; i++) {
+      if (actualActive === name) break
+      logger.debug('[switchProfile] Quick retry %d: current=%s, expected=%s', i + 1, actualActive, name)
+      await new Promise(r => setTimeout(r, 100))
+      actualActive = getActiveProfileName()
+    }
+
+    if (actualActive !== name) {
+      logger.error('[switchProfile] Verification failed: active_profile is %s (expected %s)', actualActive, name)
+      ctx.status = 500
+      ctx.body = { error: `Profile switch verification failed - active profile is ${actualActive}` }
+      return
+    }
+
+    // Update GatewayManager to match the authoritative source
     const mgr = getGatewayManagerInstance()
     if (mgr) { mgr.setActiveProfile(name) }
+
+    // Destroy all bridge sessions so they get recreated with the new profile config
+    try {
+      const { AgentBridgeClient } = await import('../../services/hermes/agent-bridge')
+      const bridge = new AgentBridgeClient()
+      await bridge.destroyAll()
+      logger.info('[switchProfile] destroyed all bridge sessions for profile "%s"', name)
+    } catch (err: any) {
+      logger.warn(err, '[switchProfile] failed to destroy bridge sessions')
+    }
+
     try {
       const detail = await hermesCli.getProfile(name)
       logger.debug('Profile detail.path = %s', detail.path)
-      if (!existsSync(join(detail.path, 'config.yaml'))) {
-        try { await hermesCli.setupReset() } catch { }
+
+      // 确保配置文件存在，但不调用 setupReset()（会重置端口配置）
+      const profileConfig = join(detail.path, 'config.yaml')
+      if (!existsSync(profileConfig)) {
+        writeFileSync(profileConfig, '# Hermes Agent Configuration\n', 'utf-8')
+        logger.info('Created config.yaml for: %s', detail.path)
       }
+
       const profileEnv = join(detail.path, '.env')
       if (!existsSync(profileEnv)) {
         writeFileSync(profileEnv, '# Hermes Agent Environment Configuration\n', 'utf-8')
@@ -159,17 +234,20 @@ export async function switchProfile(ctx: any) {
     } catch (err: any) {
       logger.error(err, 'Ensure config failed')
     }
-    const drainResult = await SessionDeleter.getInstance().drain(name)
+
+    // TODO: re-enable pending session delete drain after confirming safety
+    // const drainResult = await SessionDeleter.getInstance().drain(name)
     SessionDeleter.getInstance().switchProfile(name)
-    logger.info('[switchProfile] drain result for profile "%s": %d deleted, %d failed', name, drainResult.deleted.length, drainResult.failed.length)
-    if (drainResult.failed.length > 0) {
-      logger.warn({ profile: name, failed: drainResult.failed }, 'Failed to drain some pending session deletes after profile switch')
-    }
+    logger.info('[switchProfile] switched session deleter to profile "%s"', name)
+    // if (drainResult.failed.length > 0) {
+    //   logger.warn({ profile: name, failed: drainResult.failed }, 'Failed to drain some pending session deletes after profile switch')
+    // }
+
     ctx.body = {
       success: true,
       message: output.trim(),
-      drained_session_deletes: drainResult.deleted.length,
-      failed_session_deletes: drainResult.failed.length,
+      // drained_session_deletes: drainResult.deleted.length,
+      // failed_session_deletes: drainResult.failed.length,
     }
   } catch (err: any) {
     ctx.status = 500

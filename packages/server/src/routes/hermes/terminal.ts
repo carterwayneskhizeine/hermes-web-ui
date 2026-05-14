@@ -2,6 +2,7 @@ import { WebSocketServer } from 'ws'
 import type { Server as HttpServer } from 'http'
 import { accessSync, chmodSync, constants as fsConstants, existsSync } from 'fs'
 import { dirname, join } from 'path'
+import { homedir } from 'os'
 import { getToken } from '../../services/auth'
 import { logger } from '../../services/logger'
 
@@ -105,7 +106,7 @@ function createSession(shell: string): PtySession {
       name: 'xterm-color',
       cols: 80,
       rows: 24,
-      cwd: process.env.HOME || undefined,
+      cwd: homedir(),
     })
   } catch (err: any) {
     throw new Error(`Failed to spawn shell "${shell}": ${err.message}`)
@@ -124,7 +125,7 @@ function createSession(shell: string): PtySession {
 
 // ─── WebSocket server setup ─────────────────────────────────────
 
-export function setupTerminalWebSocket(httpServer: HttpServer) {
+export function setupTerminalWebSocket(httpServers: HttpServer | HttpServer[]) {
   if (!pty) {
     logger.warn('node-pty not available, skipping terminal WebSocket setup')
     return
@@ -132,26 +133,29 @@ export function setupTerminalWebSocket(httpServer: HttpServer) {
 
   const wss = new WebSocketServer({ noServer: true })
   const defaultShell = findShell()
+  const servers = Array.isArray(httpServers) ? httpServers : [httpServers]
 
-  httpServer.on('upgrade', async (req, socket, head) => {
-    const url = new URL(req.url || '', `http://${req.headers.host}`)
-    if (url.pathname !== '/api/hermes/terminal') {
-      return
-    }
-
-    // Auth check
-    const authToken = await getToken()
-    if (authToken) {
-      const token = url.searchParams.get('token') || ''
-      if (token !== authToken) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
-        socket.destroy()
+  servers.forEach((httpServer) => {
+    httpServer.on('upgrade', async (req, socket, head) => {
+      const url = new URL(req.url || '', `http://${req.headers.host}`)
+      if (url.pathname !== '/api/hermes/terminal') {
         return
       }
-    }
 
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req)
+      // Auth check
+      const authToken = await getToken()
+      if (authToken) {
+        const token = url.searchParams.get('token') || ''
+        if (token !== authToken) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+          socket.destroy()
+          return
+        }
+      }
+
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req)
+      })
     })
   })
 

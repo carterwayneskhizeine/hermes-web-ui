@@ -108,6 +108,7 @@ export default defineConfig({
   },
   server: {
     port: 8649,
+    allowedHosts: ['hermes.goldie-rill.top'],
     proxy: {
       '/api': createProxyConfig(),
       '/v1': createProxyConfig(),

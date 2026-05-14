@@ -14,11 +14,11 @@ const message = useMessage()
 const store = useGroupChatStore()
 const profilesStore = useProfilesStore()
 
-const showSidebar = ref(true)
+const showSidebar = ref(window.innerWidth > 768)
 const showCreateModal = ref(false)
 const showAddAgentModal = ref(false)
 const showCompressionModal = ref(false)
-const compressionConfig = ref({ triggerTokens: 100000, maxHistoryTokens: 32000, tailMessageCount: 20 })
+const compressionConfig = ref({ triggerTokens: 100000, maxHistoryTokens: 32000, tailMessageCount: 10 })
 const isCompressing = ref(false)
 const selectedProfile = ref<string | null>(null)
 const agentName = ref('')
@@ -119,7 +119,7 @@ function handleOpenCompressionConfig() {
         compressionConfig.value = {
             triggerTokens: room.triggerTokens ?? 100000,
             maxHistoryTokens: room.maxHistoryTokens ?? 32000,
-            tailMessageCount: room.tailMessageCount ?? 20,
+            tailMessageCount: room.tailMessageCount ?? 10,
         }
     }
     showCompressionModal.value = true
@@ -915,11 +915,12 @@ export default defineComponent({ components: { CreateRoomForm } })
         top: 0;
         bottom: 0;
         z-index: 100;
+        background-color: $bg-card;
         box-shadow: 4px 0 16px rgba(0, 0, 0, 0.1);
     }
 
     .chat-header {
-        padding-left: 56px;
+        padding: 16px 12px 16px 52px;
     }
 }
 </style>

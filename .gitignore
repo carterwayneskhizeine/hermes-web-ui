@@ -1,4 +1,4 @@
-h# Logs
+# Logs
 logs
 *.log
 npm-debug.log*
@@ -10,6 +10,8 @@ package-lock.json
 node_modules
 dist
 dist-ssr
+__pycache__/
+*.py[cod]
 server/dist
 packages/server/dist
 *.local
@@ -18,6 +20,10 @@ ROADMAP.md
 packages/server/data/
 packages/server/node_modules/
 .hermes-web-ui/
+
+# Hermes config files (should be in user data directory, not project root)
+config.yaml
+.env
 hermes_data/
 hermes-dependencies.md
 # Editor directories and files
@@ -32,3 +38,6 @@ hermes-dependencies.md
 *.sw?
 .superpowers/
 .claude/settings.json
+CLAUDE.md
+# Client source map artifacts
+packages/client/src/**/*.js

@@ -4,9 +4,12 @@ import { resolve } from 'path'
 import { homedir } from 'os'
 
 const isDev = process.env.NODE_ENV !== 'production'
+const isTest = process.env.VITEST === 'true' || process.env.NODE_ENV === 'test'
 
 // In WSL, always use home directory to avoid cross-filesystem issues
-const DB_DIR = isDev
+const DB_DIR = isTest
+  ? resolve(process.cwd(), 'packages/server/data/test-runtime')
+  : isDev
   ? resolve(process.cwd(), 'packages/server/data')
   : resolve(homedir(), '.hermes-web-ui')
 const DB_PATH = resolve(DB_DIR, 'hermes-web-ui.db')
@@ -110,4 +113,16 @@ export function jsonDelete(table: string, key: string): void {
  */
 export function getStoragePath(): string {
   return SQLITE_AVAILABLE ? DB_PATH : JSON_PATH
+}
+
+/**
+ * Close the SQLite database connection.
+ */
+export function closeDb(): void {
+  if (_db) {
+    try {
+      _db.close()
+    } catch { /* best-effort */ }
+    _db = null
+  }
 }

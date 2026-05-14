@@ -4,12 +4,14 @@ import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { fetchContextLength } from '@/api/hermes/sessions'
-import { NButton, NTooltip, NSwitch } from 'naive-ui'
+import { setModelContext } from '@/api/hermes/model-context'
+import { NButton, NTooltip, NSwitch, NModal, NInputNumber, useMessage } from 'naive-ui'
 import { computed, ref, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const chatStore = useChatStore()
 const { t } = useI18n()
+const message = useMessage()
 const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
 const fileInputRef = ref<HTMLInputElement>()
@@ -17,6 +19,37 @@ const attachments = ref<Attachment[]>([])
 const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
+
+// 自定义高度拖拽
+const textareaHeight = ref<number | null>(null) // null = auto
+
+function startResize(e: MouseEvent) {
+  e.preventDefault()
+  const el = textareaRef.value
+  if (!el) return
+  // 如果当前是 auto，用实际 clientHeight 作为起始值
+  const startHeight = el.clientHeight
+  const startY = e.clientY
+
+  function onMouseMove(e: MouseEvent) {
+    const deltaY = e.clientY - startY
+    // 往上拖 (deltaY < 0) → 高度增加
+    const newHeight = startHeight - deltaY
+    textareaHeight.value = Math.max(20, Math.min(400, Math.round(newHeight)))
+  }
+
+  function onMouseUp() {
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }
+
+  document.body.style.cursor = 'row-resize'
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
 
 // 自动播放语音开关
 const autoPlaySpeech = ref(false)
@@ -44,6 +77,44 @@ const canSend = computed(() => inputText.value.trim() || attachments.value.lengt
 
 const contextLength = ref(200000)
 const FALLBACK_CONTEXT = 200000
+
+// Context length editing
+const showContextEditModal = ref(false)
+const editingContextLimit = ref(200000)
+const isSavingContextLimit = ref(false)
+
+async function handleEditContextLimit() {
+  editingContextLimit.value = contextLength.value
+  showContextEditModal.value = true
+}
+
+async function saveContextLimit() {
+  if (!editingContextLimit.value || editingContextLimit.value <= 0) {
+    message.error(t('chat.contextEditInvalid'))
+    return
+  }
+
+  isSavingContextLimit.value = true
+  try {
+    const appStore = useAppStore()
+    const provider = appStore.selectedProvider || ''
+    const model = appStore.selectedModel || ''
+
+    if (!provider || !model) {
+      message.error(t('chat.contextEditFailed'))
+      return
+    }
+
+    await setModelContext(provider, model, editingContextLimit.value)
+    contextLength.value = editingContextLimit.value
+    showContextEditModal.value = false
+    message.success(t('chat.contextEditSuccess'))
+  } catch (err: any) {
+    message.error(`${t('chat.contextEditFailed')}: ${err.message || ''}`)
+  } finally {
+    isSavingContextLimit.value = false
+  }
+}
 
 async function loadContextLength() {
   try {
@@ -189,6 +260,8 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 function handleInput(e: Event) {
+  // 用户手动拖拽自定义高度时，不覆盖
+  if (textareaHeight.value !== null) return
   const el = e.target as HTMLTextAreaElement
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 100) + 'px'
@@ -247,7 +320,16 @@ function isImage(type: string): boolean {
       </div>
 
       <span v-if="totalTokens > 0" class="context-info" :class="{ 'context-warning': usagePercent > 80 }">
-        {{ formatTokens(totalTokens) }} / {{ formatTokens(contextLength) }} · {{ t('chat.contextRemaining') }} {{ formatTokens(remainingTokens) }}
+        {{ formatTokens(totalTokens) }} /
+        <NTooltip trigger="hover">
+          <template #trigger>
+            <span class="context-limit-editable" @click="handleEditContextLimit">
+              {{ formatTokens(contextLength) }}
+            </span>
+          </template>
+          <span>{{ t('chat.contextClickToEdit') }}</span>
+        </NTooltip>
+        · {{ t('chat.contextRemaining') }} {{ formatTokens(remainingTokens) }}
       </span>
       <div v-if="totalTokens > 0" class="context-bar">
         <div
@@ -300,10 +382,12 @@ function isImage(type: string): boolean {
         class="file-input-hidden"
         @change="handleFileChange"
       />
+      <div class="resize-handle" @mousedown="startResize"></div>
       <textarea
         ref="textareaRef"
         v-model="inputText"
         class="input-textarea"
+        :style="textareaHeight ? { height: textareaHeight + 'px' } : {}"
         :placeholder="t('chat.inputPlaceholder')"
         rows="1"
         @keydown="handleKeydown"
@@ -317,6 +401,7 @@ function isImage(type: string): boolean {
           v-if="chatStore.isStreaming"
           size="small"
           type="error"
+          :disabled="chatStore.isAborting"
           @click="chatStore.stopStreaming()"
         >
           {{ t('chat.stop') }}
@@ -324,7 +409,7 @@ function isImage(type: string): boolean {
         <NButton
           size="small"
           type="primary"
-          :disabled="!canSend || chatStore.isStreaming"
+          :disabled="!canSend"
           @click="handleSend"
         >
           <template #icon>
@@ -334,6 +419,47 @@ function isImage(type: string): boolean {
         </NButton>
       </div>
     </div>
+
+    <!-- Context Length Edit Modal -->
+    <NModal
+      v-model:show="showContextEditModal"
+      :title="t('chat.contextEditTitle')"
+      :mask-closable="true"
+      preset="card"
+      style="width: 400px"
+    >
+      <div class="context-edit-content">
+        <p style="margin-bottom: 16px; color: #666;">
+          {{ t('chat.contextEditDesc') }}
+        </p>
+        <NInputNumber
+          v-model:value="editingContextLimit"
+          :min="1000"
+          :max="10000000"
+          :step="1000"
+          :show-button="false"
+          :placeholder="t('chat.contextEditPlaceholder')"
+          style="width: 100%"
+        >
+          <template #suffix>
+            <span style="color: #999;">tokens</span>
+          </template>
+        </NInputNumber>
+        <div style="margin-top: 12px; font-size: 12px; color: #999;">
+          {{ t('chat.contextEditHint') }}
+        </div>
+      </div>
+      <template #footer>
+        <div style="display: flex; justify-content: flex-end; gap: 8px;">
+          <NButton @click="showContextEditModal = false" :disabled="isSavingContextLimit">
+            {{ t('chat.contextEditCancel') }}
+          </NButton>
+          <NButton type="primary" @click="saveContextLimit" :loading="isSavingContextLimit">
+            {{ t('chat.contextEditSave') }}
+          </NButton>
+        </div>
+      </template>
+    </NModal>
   </div>
 </template>
 
@@ -379,6 +505,19 @@ function isImage(type: string): boolean {
 
   &.context-warning {
     color: #e8a735;
+  }
+}
+
+.context-limit-editable {
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+  transition: all 0.2s ease;
+  padding: 0 2px;
+
+  &:hover {
+    border-bottom-color: $text-muted;
+    background: rgba(128, 128, 128, 0.1);
+    border-radius: 2px;
   }
 }
 
@@ -490,6 +629,7 @@ function isImage(type: string): boolean {
   border: 1px solid $border-color;
   border-radius: $radius-md;
   padding: 10px 12px;
+  position: relative;
   transition: border-color $transition-fast, background-color $transition-fast;
 
   &:focus-within {
@@ -498,6 +638,21 @@ function isImage(type: string): boolean {
 
   .dark & {
     background-color: #333333;
+  }
+}
+
+.resize-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: row-resize;
+  z-index: 2;
+
+  &:hover {
+    background: rgba($accent-primary, 0.15);
+    border-radius: 4px;
   }
 }
 
@@ -511,7 +666,7 @@ function isImage(type: string): boolean {
   font-size: 14px;
   line-height: 1.5;
   resize: none;
-  max-height: 100px;
+  max-height: 400px;
   min-height: 20px;
   overflow-y: auto;
 

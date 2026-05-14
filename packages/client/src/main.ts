@@ -1,15 +1,27 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import router from './router'
-import { i18n } from './i18n'
+import { i18n, setupI18n } from './i18n'
 import App from './App.vue'
 import './styles/global.scss'
 
-// Apply dark class before mount to prevent FOUC
-const savedTheme = localStorage.getItem('hermes_theme') || 'system'
+// Apply theme classes before mount to prevent FOUC (Flash of Unstyled Content)
+const savedBrightness = localStorage.getItem('hermes_brightness') || 'system'
+const savedStyle = localStorage.getItem('hermes_style') || 'ink'
+
+// Resolve dark mode
 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-if (savedTheme === 'dark' || (savedTheme === 'system' && prefersDark)) {
+const isDark = savedBrightness === 'dark' || (savedBrightness === 'system' && prefersDark)
+
+// Resolve style
+const isComic = savedStyle === 'comic'
+
+// Apply classes to prevent FOUC
+if (isDark) {
   document.documentElement.classList.add('dark')
+}
+if (isComic) {
+  document.documentElement.classList.add('comic')
 }
 
 // Read token from URL BEFORE router initializes (hash router strips params)
@@ -24,4 +36,6 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(i18n)
 app.use(router)
-app.mount('#app')
+setupI18n().then(() => {
+  app.mount('#app')
+})
