@@ -26,23 +26,87 @@ const { t } = useI18n();
 const toast = useMessage();
 
 const isSystem = computed(() => props.message.role === "system");
+const isCommandMessage = computed(() => props.message.role === "command" || props.message.systemType === "command");
+const isCommandError = computed(() => props.message.role === "command" && props.message.systemType === "error");
+const isStatusCommand = computed(() => isCommandMessage.value && props.message.commandAction === "status");
+const statusItems = computed(() => {
+  const data = props.message.commandData || {};
+  return [
+    { key: "status", value: data.isWorking ? "running" : "idle" },
+    { key: "source", value: data.source },
+    { key: "profile", value: data.profile },
+    { key: "model", value: data.model || "-" },
+    { key: "queue", value: data.queueLength ?? 0 },
+    { key: "run", value: data.runId || "-" },
+  ];
+});
+
+type DisplayContentFile = {
+  type: 'image' | 'file'
+  name: string
+  path?: string
+  url?: string
+}
+
+function getBlockText(block: any): string {
+  if (!block || typeof block !== 'object') return ''
+  if (block.type === 'text' || block.type === 'input_text') {
+    return typeof block.text === 'string' ? block.text : ''
+  }
+  return ''
+}
+
+function getImageUrlFromBlock(block: any): string | null {
+  if (!block || typeof block !== 'object') return null
+  if (block.type !== 'input_image' && block.type !== 'image_url') return null
+  const raw = block.image_url
+  if (typeof raw === 'string') return raw
+  if (raw && typeof raw === 'object' && typeof raw.url === 'string') return raw.url
+  return null
+}
+
+function imageNameFromDataUrl(url: string, index: number): string {
+  const match = url.match(/^data:image\/([^;,]+)/i)
+  const ext = match?.[1] === 'jpeg' ? 'jpg' : match?.[1] || 'png'
+  return `image-${index + 1}.${ext}`
+}
+
+function parseContentBlocks(content: string): Array<ContentBlock | Record<string, unknown>> | null {
+  const trimmed = content.trim()
+  if (!trimmed) return null
+
+  const parse = (value: string) => {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.length > 0 && 'type' in parsed[0]
+      ? parsed as Array<ContentBlock | Record<string, unknown>>
+      : null
+  }
+
+  try {
+    return parse(trimmed)
+  } catch {
+    // Hermes Agent stored some multimodal user messages via Python str(list),
+    // e.g. [{'type': 'text'}, {'type': 'image_url', ...}]. Convert that
+    // legacy repr into JSON for display only.
+    if (!trimmed.startsWith("[{'") && !trimmed.startsWith('[{"')) return null
+    try {
+      return parse(
+        trimmed
+          .replace(/\bNone\b/g, 'null')
+          .replace(/\bTrue\b/g, 'true')
+          .replace(/\bFalse\b/g, 'false')
+          .replace(/'/g, '"'),
+      )
+    } catch {
+      return null
+    }
+  }
+}
 
 // Parse ContentBlock[] from JSON string
 const contentBlocks = computed(() => {
   const content = props.message.content || '';
-  if (!content.trim()) return null;
-
-  try {
-    // Try to parse as ContentBlock[] array
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed) && parsed.length > 0 && 'type' in parsed[0]) {
-      return parsed as ContentBlock[];
-    }
-  } catch {
-    // Not valid JSON, treat as plain text
-  }
-
-  return null;
+  return parseContentBlocks(content);
 });
 
 // Check if content is in ContentBlock[] format
@@ -56,16 +120,40 @@ const displayText = computed(() => {
 
   // Extract text from blocks
   return contentBlocks.value!
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
+    .map(block => getBlockText(block))
+    .filter(Boolean)
     .join('\n');
 });
 
 // Extract files from ContentBlock[]
-const contentFiles = computed(() => {
+const contentFiles = computed<DisplayContentFile[] | null>(() => {
   if (!isContentBlockArray.value) return null;
 
-  return contentBlocks.value!.filter(block => block.type === 'image' || block.type === 'file');
+  return contentBlocks.value!.flatMap<DisplayContentFile>((block, index) => {
+    if (block.type === 'image') {
+      return [{
+        type: 'image' as const,
+        name: String((block as any).name || `image-${index + 1}`),
+        path: String((block as any).path || ''),
+      }].filter(file => file.path)
+    }
+    if (block.type === 'file') {
+      return [{
+        type: 'file' as const,
+        name: String((block as any).name || `file-${index + 1}`),
+        path: String((block as any).path || ''),
+      }].filter(file => file.path)
+    }
+    const imageUrl = getImageUrlFromBlock(block)
+    if (imageUrl?.startsWith('data:image/')) {
+      return [{
+        type: 'image' as const,
+        name: imageNameFromDataUrl(imageUrl, index),
+        url: imageUrl,
+      }]
+    }
+    return []
+  });
 });
 
 // Generate download URL with auth token
@@ -73,6 +161,11 @@ function getDownloadUrl(path: string, name: string): string {
 	const token = getApiKey();
 	const base = `/api/hermes/download?path=${encodeURIComponent(path)}&name=${encodeURIComponent(name)}`;
 	return token ? `${base}&token=${encodeURIComponent(token)}` : base;
+}
+
+function getContentFileUrl(file: DisplayContentFile): string {
+  if (file.url) return file.url
+  return file.path ? getDownloadUrl(file.path, file.name) : ''
 }
 
 const toolExpanded = ref(false);
@@ -357,22 +450,22 @@ const canPlaySpeech = computed(() => {
   // 只有 assistant 消息可以播放
   if (props.message.role !== 'assistant') return false
   if (!copyableContent.value) return false
-  // OpenAI / Custom / Edge 不依赖浏览器 Web Speech API
-  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge') return true
+  // OpenAI / Custom / Edge / MiMo 不依赖浏览器 Web Speech API
+  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge' || voiceSettings.provider.value === 'mimo') return true
   return speech.isSupported
 })
 
 const isPlayingThisMessage = computed(() => {
-  // OpenAI / Custom / Edge 模式
-  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge') {
+  // OpenAI / Custom / Edge / MiMo 模式
+  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge' || voiceSettings.provider.value === 'mimo') {
     return speech.currentCustomMessageId.value === props.message.id && speech.isCustomPlaying.value
   }
   return speech.currentMessageId.value === props.message.id && speech.isPlaying.value
 })
 
 const isPausedThisMessage = computed(() => {
-  // OpenAI / Custom / Edge 模式
-  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge') {
+  // OpenAI / Custom / Edge / MiMo 模式
+  if (voiceSettings.provider.value === 'openai' || voiceSettings.provider.value === 'custom' || voiceSettings.provider.value === 'edge' || voiceSettings.provider.value === 'mimo') {
     return speech.currentCustomMessageId.value === props.message.id && speech.isCustomPaused.value
   }
   return speech.currentMessageId.value === props.message.id && speech.isPaused.value
@@ -427,6 +520,24 @@ function handleSpeechToggle() {
     return
   }
 
+  // MiMo TTS 模式
+  if (voiceSettings.provider.value === 'mimo') {
+    const apiKey = voiceSettings.mimoApiKey.value
+    if (!apiKey) {
+      console.warn('[MessageItem] MiMo TTS API Key 为空')
+      return
+    }
+    speech.mimoToggle(props.message.id, content, {
+      baseUrl: voiceSettings.mimoBaseUrl.value,
+      apiKey,
+      model: voiceSettings.mimoModel.value,
+      voice: voiceSettings.mimoVoice.value,
+      voiceDesignDesc: voiceSettings.mimoVoiceDesignDesc.value || undefined,
+      stylePrompt: voiceSettings.mimoStylePrompt.value || undefined,
+    })
+    return
+  }
+
   // Web Speech API 模式
   if (voiceSettings.provider.value === 'webspeech') {
     const text = speech.extractReadableText(content)
@@ -472,6 +583,18 @@ onMounted(() => {
           rate: speedToEdgeRate(voiceSettings.edgeRate.value),
           pitch: hzToEdgePitch(voiceSettings.edgePitchHz.value),
         })
+      } else if (voiceSettings.provider.value === 'mimo') {
+        const apiKey = voiceSettings.mimoApiKey.value
+        if (apiKey) {
+          speech.mimoPlay(props.message.id, content, {
+            baseUrl: voiceSettings.mimoBaseUrl.value,
+            apiKey,
+            model: voiceSettings.mimoModel.value,
+            voice: voiceSettings.mimoVoice.value,
+            voiceDesignDesc: voiceSettings.mimoVoiceDesignDesc.value || undefined,
+            stylePrompt: voiceSettings.mimoStylePrompt.value || undefined,
+          })
+        }
       } else if (voiceSettings.provider.value === 'webspeech') {
         const text = speech.extractReadableText(content)
         if (text) {
@@ -572,7 +695,15 @@ onBeforeUnmount(() => {
           class="msg-avatar"
         />
         <div class="msg-content" :class="message.role">
-          <div class="message-bubble" :class="{ system: isSystem, 'speech-playing': isPlayingThisMessage && !isPausedThisMessage }">
+          <div
+            class="message-bubble"
+            :class="{
+              system: isSystem,
+              command: isCommandMessage,
+              'command-error': isCommandError,
+              'speech-playing': isPlayingThisMessage && !isPausedThisMessage,
+            }"
+          >
             <div v-if="hasAttachments" class="msg-attachments">
               <div
                 v-for="att in message.attachments"
@@ -669,16 +800,16 @@ onBeforeUnmount(() => {
                   >
                     <template v-if="file.type === 'image'">
                       <img
-                        :src="getDownloadUrl(file.path, file.name)"
+                        :src="getContentFileUrl(file)"
                         :alt="file.name"
                         class="msg-attachment-thumb"
-                        @click="previewUrl = getDownloadUrl(file.path, file.name)"
+                        @click="previewUrl = getContentFileUrl(file)"
                       />
                     </template>
                     <template v-else>
                       <div
                         class="msg-attachment-file"
-                        @click="downloadFile(file.path, file.name).catch(err => toast.error(err.message || t('download.downloadFailed')))"
+                        @click="file.path && downloadFile(file.path, file.name).catch(err => toast.error(err.message || t('download.downloadFailed')))"
                         style="cursor: pointer;"
                         :title="t('download.downloadFile')"
                       >
@@ -702,6 +833,29 @@ onBeforeUnmount(() => {
               v-if="message.role === 'assistant' && message.content && !parsedThinking.body"
               :content="message.content"
             />
+
+            <!-- Render system message content -->
+            <MarkdownRenderer
+              v-if="message.role === 'system' && message.content && !isCommandMessage"
+              :content="message.content"
+            />
+            <div v-if="isStatusCommand" class="command-result command-status">
+              <span class="command-result-icon">/</span>
+              <div class="command-status-grid">
+                <span
+                  v-for="item in statusItems"
+                  :key="item.key"
+                  class="command-status-item"
+                >
+                  <span class="command-status-key">{{ item.key }}</span>
+                  <span class="command-status-value">{{ item.value }}</span>
+                </span>
+              </div>
+            </div>
+            <div v-else-if="isCommandMessage && message.content" class="command-result">
+              <span class="command-result-icon">/</span>
+              <MarkdownRenderer :content="message.content" />
+            </div>
 
             <span v-if="message.isStreaming && !message.content" class="streaming-dots">
               <span></span><span></span><span></span>
@@ -806,6 +960,10 @@ onBeforeUnmount(() => {
     align-items: flex-start;
   }
 
+  &.command {
+    align-items: flex-start;
+  }
+
   &.highlight {
     .message-bubble {
       box-shadow: 0 0 0 1px rgba(var(--accent-primary-rgb), 0.45);
@@ -855,6 +1013,20 @@ onBeforeUnmount(() => {
     background-color: rgba(var(--warning-rgb), 0.06);
   }
 
+  &.command {
+    border-left: none;
+    border: 1px solid rgba(var(--accent-primary-rgb), 0.12);
+    background-color: rgba(var(--accent-primary-rgb), 0.04);
+    color: $text-secondary;
+    max-width: min(100%, 960px);
+    padding: 8px 10px;
+  }
+
+  &.command-error {
+    border-color: rgba(var(--warning-rgb), 0.28);
+    background-color: rgba(var(--warning-rgb), 0.06);
+  }
+
   &.speech-playing {
     box-shadow:
       0 0 0 2px #ff6b6b,
@@ -862,6 +1034,74 @@ onBeforeUnmount(() => {
       0 0 20px rgba(255, 107, 107, 0.2);
     animation: rainbow-glow 4s linear infinite;
   }
+}
+
+.command-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+
+  :deep(.markdown-body) {
+    min-width: 0;
+  }
+
+  :deep(.markdown-body p) {
+    margin: 0;
+  }
+}
+
+.command-status {
+  align-items: center;
+}
+
+.command-status-grid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+
+.command-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(var(--accent-primary-rgb), 0.1);
+  border-radius: 999px;
+  background: rgba(var(--accent-primary-rgb), 0.035);
+  line-height: 1.4;
+}
+
+.command-status-key {
+  color: $text-muted;
+  font-size: 11px;
+}
+
+.command-status-value {
+  color: $text-primary;
+  font-family: $font-code;
+  font-size: 11px;
+}
+
+.command-result-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(var(--accent-primary-rgb), 0.1);
+  color: $accent-primary;
+  font-family: $font-code;
+  font-size: 12px;
+  line-height: 1;
+  margin-top: 2px;
 }
 
 @keyframes rainbow-glow {
