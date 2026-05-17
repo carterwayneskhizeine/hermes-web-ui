@@ -89,7 +89,7 @@ hermes CLI 的 `print()` 在 Windows 上输出 CRLF (`\r\n`)。`child_process.ex
 
 - **`package.json`**：`engines.node >= 22.0.0`，新增 `cross-env` 依赖。
 
-- **`nodemon.json`**：`HERMES_BIN` 指向本地开发用的 hermes CLI 绝对路径——**这是 KK 本地路径，其他开发者请勿提交修改**。
+- **`nodemon.json`**：`HERMES_BIN` 指向本地开发用的 hermes CLI 绝对路径（当前：`D:\Code\hermes-agent\venv\Scripts\hermes.exe`）——**这是 KK 本地路径，其他开发者请勿提交修改**。上游每次重写 `nodemon.json` 都会丢失此配置，合并后必须手动补回（见第 4 节验证步骤 5）。
 
 ---
 
@@ -131,6 +131,14 @@ git merge upstream/main --no-edit
    git log --oneline windows ^upstream/main
    ```
    应能看到 `2bb6db6`、`65e84c6`、`f511f84`。
+5. **`nodemon.json` 的 `HERMES_BIN` 仍在**：
+   ```powershell
+   grep -n "HERMES_BIN" nodemon.json
+   ```
+   应能找到匹配。若无输出，手动补回（上游会重写此文件）：
+   ```json
+   "HERMES_BIN": "D:\\Code\\hermes-agent\\venv\\Scripts\\hermes.exe"
+   ```
 
 ### 提交合并
 
@@ -150,5 +158,6 @@ git commit --no-edit       # 使用 git 生成的默认 merge 信息即可
 | 较早 | `9d1e7e2` | `acf5184` | follow-up |
 | 2026-05-16 | `d16251c` | `7d7c8b7` | 86 个提交，冲突仅 `gateway-bootstrap.ts`（上游恢复了 `startAll()`，已删除） |
 | 2026-05-17 | `7f96b7b` | `bbfd818` | 16 个提交，无冲突，自动合并；新增诊断字段、xAI OAuth、session bridge 等功能 |
+| 2026-05-18 | — | — | 发现上游重写 `nodemon.json` 导致 `HERMES_BIN` 丢失（`spawn hermes ENOENT`），已手动补回；更新本文档并新增验证步骤 5 |
 
 > 下次合并请追加一行。
