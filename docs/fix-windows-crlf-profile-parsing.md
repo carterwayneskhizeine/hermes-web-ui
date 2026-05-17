@@ -149,5 +149,6 @@ git commit --no-edit       # 使用 git 生成的默认 merge 信息即可
 | 较早 | `a8cf897` | — | 第二次合并 |
 | 较早 | `9d1e7e2` | `acf5184` | follow-up |
 | 2026-05-16 | `d16251c` | `7d7c8b7` | 86 个提交，冲突仅 `gateway-bootstrap.ts`（上游恢复了 `startAll()`，已删除） |
+| 2026-05-17 | `7f96b7b` | `bbfd818` | 16 个提交，无冲突，自动合并；新增诊断字段、xAI OAuth、session bridge 等功能 |
 
 > 下次合并请追加一行。
