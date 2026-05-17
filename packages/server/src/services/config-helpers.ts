@@ -22,6 +22,7 @@ export const PROVIDER_ENV_MAP: Record<string, { api_key_env: string; base_url_en
   'alibaba-coding-plan': { api_key_env: 'ALIBABA_CODING_PLAN_API_KEY', base_url_env: 'ALIBABA_CODING_PLAN_BASE_URL' },
   anthropic: { api_key_env: 'ANTHROPIC_API_KEY', base_url_env: '' },
   xai: { api_key_env: 'XAI_API_KEY', base_url_env: '' },
+  'xai-oauth': { api_key_env: '', base_url_env: '' },
   xiaomi: { api_key_env: 'XIAOMI_API_KEY', base_url_env: '' },
   'xiaomi-token-plan': { api_key_env: '', base_url_env: '' },
   gemini: { api_key_env: 'GEMINI_API_KEY', base_url_env: '' },
@@ -87,7 +88,14 @@ export async function updateConfigYaml<T = void>(
 
 // --- .env helpers ---
 
+function assertValidEnvKey(key: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new Error(`Invalid .env key: ${JSON.stringify(key)}`)
+  }
+}
+
 export async function saveEnvValue(key: string, value: string): Promise<void> {
+  assertValidEnvKey(key)
   const envPath = getActiveEnvPath()
   await safeFileStore.updateText(envPath, (raw) => {
     const remove = !value

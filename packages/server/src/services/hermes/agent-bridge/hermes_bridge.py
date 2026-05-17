@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import json
 import os
 import queue
@@ -21,6 +22,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -115,10 +117,17 @@ def _candidate_agent_roots(raw: str | None = None) -> list[Path]:
     return unique
 
 
-def _discover_agent_root(raw: str | None = None) -> Path:
+def _find_agent_root(raw: str | None = None) -> Path | None:
     for candidate in _candidate_agent_roots(raw):
         if (candidate / "run_agent.py").exists():
             return candidate
+    return None
+
+
+def _discover_agent_root(raw: str | None = None) -> Path:
+    root = _find_agent_root(raw)
+    if root is not None:
+        return root
     attempted = ", ".join(str(path) for path in _candidate_agent_roots(raw))
     raise RuntimeError(
         "hermes-agent run_agent.py not found. Pass --agent-root or set "
@@ -135,6 +144,12 @@ def _discover_hermes_home(raw: str | None = None) -> Path:
     return Path(DEFAULT_HERMES_HOME).expanduser().resolve()
 
 
+def _normalize_base_home(home: Path) -> Path:
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
+
+
 def _jsonable(value: Any) -> Any:
     try:
         json.dumps(value)
@@ -147,8 +162,8 @@ def _jsonable(value: Any) -> Any:
         return str(value)
 
 
-def _agent_root() -> Path:
-    return _discover_agent_root(os.environ.get("HERMES_AGENT_ROOT"))
+def _agent_root() -> Path | None:
+    return _find_agent_root(os.environ.get("HERMES_AGENT_ROOT"))
 
 
 def _hermes_home() -> Path:
@@ -156,7 +171,7 @@ def _hermes_home() -> Path:
 
 
 def _base_hermes_home() -> Path:
-    return _discover_hermes_home(os.environ.get("HERMES_AGENT_BRIDGE_BASE_HOME") or DEFAULT_HERMES_HOME)
+    return _normalize_base_home(_discover_hermes_home(os.environ.get("HERMES_AGENT_BRIDGE_BASE_HOME") or DEFAULT_HERMES_HOME))
 
 
 def _profile_home(profile: str | None) -> Path:
@@ -167,20 +182,68 @@ def _profile_home(profile: str | None) -> Path:
     return profile_home if profile_home.exists() else base
 
 
+def _read_dotenv(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            if stripped.startswith("export "):
+                stripped = stripped[7:].strip()
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            if not key or not (key[0].isalpha() or key[0] == "_"):
+                continue
+            if not all(ch.isalnum() or ch == "_" for ch in key):
+                continue
+            value = value.strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            values[key] = value
+        return values
+    except Exception:
+        return {}
+
+
+def _profile_dotenv_keys() -> set[str]:
+    base = _base_hermes_home()
+    keys = set(_read_dotenv(base / ".env").keys())
+    profiles_dir = base / "profiles"
+    try:
+        for entry in profiles_dir.iterdir():
+            if entry.is_dir():
+                keys.update(_read_dotenv(entry / ".env").keys())
+    except Exception:
+        pass
+    return keys
+
+
 def _set_path_env(agent_root: str | None = None, hermes_home: str | None = None) -> None:
-    os.environ["HERMES_AGENT_ROOT"] = str(_discover_agent_root(agent_root))
-    resolved_home = str(_discover_hermes_home(hermes_home))
-    os.environ["HERMES_HOME"] = resolved_home
-    os.environ["HERMES_AGENT_BRIDGE_BASE_HOME"] = resolved_home
+    resolved_root = _discover_agent_root(agent_root) if agent_root else _find_agent_root()
+    if resolved_root is not None:
+        os.environ["HERMES_AGENT_ROOT"] = str(resolved_root)
+    else:
+        os.environ.pop("HERMES_AGENT_ROOT", None)
+    resolved_home = _discover_hermes_home(hermes_home)
+    os.environ["HERMES_HOME"] = str(resolved_home)
+    os.environ["HERMES_AGENT_BRIDGE_BASE_HOME"] = str(_normalize_base_home(resolved_home))
 
 
 def _ensure_agent_imports() -> None:
     root = _agent_root()
-    if not (root / "run_agent.py").exists():
-        raise RuntimeError(f"hermes-agent run_agent.py not found under {root}")
-    root_s = str(root)
-    if root_s not in sys.path:
-        sys.path.insert(0, root_s)
+    if root is not None:
+        root_s = str(root)
+        if root_s not in sys.path:
+            sys.path.insert(0, root_s)
+    elif importlib.util.find_spec("run_agent") is None:
+        raise RuntimeError(
+            "hermes-agent run_agent.py not found in source locations and the "
+            "current Python environment cannot import run_agent. Install "
+            "hermes-agent or pass --agent-root/HERMES_AGENT_ROOT."
+        )
     os.environ.setdefault("HERMES_HOME", str(_hermes_home()))
     os.environ.setdefault("HERMES_AGENT_BRIDGE_BASE_HOME", str(_hermes_home()))
 
@@ -208,8 +271,6 @@ def _apply_profile_env(profile: str | None) -> str | None:
     """Temporarily set HERMES_HOME to the profile directory.
     Returns the original HERMES_HOME value to restore later.
     """
-    if not profile or profile == "default":
-        return os.environ.get("HERMES_HOME")
     profile_home = _profile_home(profile)
     if not (profile_home / "config.yaml").exists():
         return os.environ.get("HERMES_HOME")
@@ -224,6 +285,49 @@ def _restore_profile_env(original: str | None) -> None:
         os.environ["HERMES_HOME"] = original
     else:
         os.environ.pop("HERMES_HOME", None)
+
+
+def _apply_profile_dotenv(profile: str | None) -> dict[str, str | None]:
+    """Load only the active profile's .env into this bridge process.
+
+    This mirrors Web UI gateway env isolation:
+    - default keeps inherited env for compatibility, then overlays default .env
+    - non-default clears keys seen in any profile .env, then overlays its .env
+    The returned snapshot restores the bridge process after the agent call.
+    """
+    values = _read_dotenv(_profile_home(profile) / ".env")
+    if profile and profile != "default":
+        keys = _profile_dotenv_keys()
+        keys.update(values.keys())
+    else:
+        keys = set(values.keys())
+    snapshot = {key: os.environ.get(key) for key in keys}
+
+    if profile and profile != "default":
+        for key in keys:
+            os.environ.pop(key, None)
+    for key, value in values.items():
+        os.environ[key] = value
+    return snapshot
+
+
+def _restore_profile_dotenv(snapshot: dict[str, str | None]) -> None:
+    for key, value in snapshot.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+@contextmanager
+def _profile_env(profile: str | None):
+    original = _apply_profile_env(profile)
+    env_snapshot = _apply_profile_dotenv(profile)
+    try:
+        yield
+    finally:
+        _restore_profile_dotenv(env_snapshot)
+        _restore_profile_env(original)
 
 
 def _resolve_model(cfg: dict[str, Any]) -> str:
@@ -385,12 +489,21 @@ class AgentPool:
         self,
         session_id: str,
         profile: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> AgentSession:
+        requested_model = str(model or "").strip()
+        requested_provider = str(provider or "").strip()
         with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 # If profile changed, destroy old session and recreate
-                if profile and existing.config.get("profile") != profile:
+                config_changed = bool(
+                    (profile and existing.config.get("profile") != profile)
+                    or (requested_model and existing.config.get("model") != requested_model)
+                    or (requested_provider and existing.config.get("provider") != requested_provider)
+                )
+                if config_changed:
                     if not existing.running:
                         self._destroy_session(session_id)
                     else:
@@ -404,11 +517,10 @@ class AgentPool:
             _suppress_bridge_platform_hint()
             from run_agent import AIAgent
 
-            original_home = _apply_profile_env(profile)
-            try:
+            with _profile_env(profile):
                 cfg = _load_cfg()
-                resolved_model = _resolve_model(cfg)
-                runtime = _resolve_runtime(resolved_model)
+                resolved_model = requested_model or _resolve_model(cfg)
+                runtime = _resolve_runtime(resolved_model, requested_provider or None)
                 agent_cfg = cfg.get("agent") or {}
                 prompt = str(agent_cfg.get("system_prompt", "") or "").strip() or None
 
@@ -460,8 +572,6 @@ class AgentPool:
                 )
                 self._sessions[session_id] = session
                 return session
-            finally:
-                _restore_profile_env(original_home)
 
     def _install_compression_hook(self, agent: Any, session_id: str) -> None:
         original = getattr(agent, "_compress_context", None)
@@ -846,8 +956,10 @@ class AgentPool:
         conversation_history: list[dict[str, Any]] | None = None,
         profile: str | None = None,
         force_compress: bool = False,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> RunRecord:
-        session = self.get_or_create(session_id, profile=profile)
+        session = self.get_or_create(session_id, profile=profile, model=model, provider=provider)
         with session.lock:
             if session.running:
                 raise RuntimeError(f"session {session_id} is already running")
@@ -870,100 +982,101 @@ class AgentPool:
 
     def _run_chat(self, session: AgentSession, record: RunRecord, message: Any, storage_message: Any | None = None, instructions: str | None = None, conversation_history: list[dict[str, Any]] | None = None, profile: str | None = None, force_compress: bool = False) -> None:
         with self._run_lock:
-            def stream_callback(delta: str) -> None:
-                with self._lock:
-                    record.deltas.append(str(delta))
+            with _profile_env(profile):
+                def stream_callback(delta: str) -> None:
+                    with self._lock:
+                        record.deltas.append(str(delta))
 
-            try:
-                previous_approval_callback = None
-                previous_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-                approval_session_token = None
-                registered_gateway_approval_session = None
                 try:
-                    from tools.terminal_tool import _get_approval_callback, set_approval_callback
-                    from tools.approval import register_gateway_notify, set_current_session_key
-
-                    previous_approval_callback = _get_approval_callback()
-                    set_approval_callback(self._approval_callback(session.session_id))
-                    approval_session_token = set_current_session_key(session.session_id)
-                    register_gateway_notify(session.session_id, self._gateway_approval_notify(session.session_id))
-                    registered_gateway_approval_session = session.session_id
-                    os.environ["HERMES_EXEC_ASK"] = "1"
-                except Exception:
                     previous_approval_callback = None
-                self._prepersist_user_message(session, message, storage_message, conversation_history, profile)
-                db_count_after_prepersist = self._session_db_message_count(session.session_id, profile)
-                if force_compress:
-                    compress = getattr(session.agent, "_compress_context", None)
-                    if callable(compress):
-                        compressed_history, compressed_system = compress(
-                            conversation_history if isinstance(conversation_history, list) else [],
-                            instructions,
-                            approx_tokens=None,
-                            focus_topic="debug_force_compress",
-                        )
-                        if isinstance(compressed_history, list):
-                            conversation_history = compressed_history
-                        if isinstance(compressed_system, str):
-                            instructions = compressed_system
-                kwargs: dict[str, Any] = dict(
-                    task_id=session.session_id,
-                    stream_callback=stream_callback,
-                )
-                if instructions:
-                    kwargs["system_message"] = instructions
-                if conversation_history is not None:
-                    kwargs["conversation_history"] = conversation_history
-                result = session.agent.run_conversation(
-                    message,
-                    **kwargs,
-                )
-                result = _jsonable(result if isinstance(result, dict) else {"value": result})
-                self._sync_result_tail_to_session_db(
-                    session,
-                    result,
-                    conversation_history,
-                    profile,
-                    db_count_after_prepersist,
-                )
-                with session.lock:
-                    if isinstance(result.get("messages"), list):
-                        session.history = result["messages"]
-                    record.status = "interrupted" if result.get("interrupted") else "complete"
-                    record.result = result
-                    record.ended_at = time.time()
-                    session.running = False
-                    session.current_run_id = None
-                    session.last_used_at = time.time()
-            except Exception as exc:
-                with session.lock:
-                    record.status = "error"
-                    record.error = str(exc)
-                    record.result = {"error": str(exc), "traceback": traceback.format_exc()}
-                    record.ended_at = time.time()
-                    session.running = False
-                    session.current_run_id = None
-                    session.last_used_at = time.time()
-            finally:
-                try:
-                    from tools.terminal_tool import set_approval_callback
-
-                    set_approval_callback(previous_approval_callback)
-                except Exception:
-                    pass
-                if approval_session_token is not None:
+                    previous_exec_ask = os.environ.get("HERMES_EXEC_ASK")
+                    approval_session_token = None
+                    registered_gateway_approval_session = None
                     try:
-                        from tools.approval import reset_current_session_key, unregister_gateway_notify
+                        from tools.terminal_tool import _get_approval_callback, set_approval_callback
+                        from tools.approval import register_gateway_notify, set_current_session_key
 
-                        if registered_gateway_approval_session is not None:
-                            unregister_gateway_notify(registered_gateway_approval_session)
-                        reset_current_session_key(approval_session_token)
+                        previous_approval_callback = _get_approval_callback()
+                        set_approval_callback(self._approval_callback(session.session_id))
+                        approval_session_token = set_current_session_key(session.session_id)
+                        register_gateway_notify(session.session_id, self._gateway_approval_notify(session.session_id))
+                        registered_gateway_approval_session = session.session_id
+                        os.environ["HERMES_EXEC_ASK"] = "1"
+                    except Exception:
+                        previous_approval_callback = None
+                    self._prepersist_user_message(session, message, storage_message, conversation_history, profile)
+                    db_count_after_prepersist = self._session_db_message_count(session.session_id, profile)
+                    if force_compress:
+                        compress = getattr(session.agent, "_compress_context", None)
+                        if callable(compress):
+                            compressed_history, compressed_system = compress(
+                                conversation_history if isinstance(conversation_history, list) else [],
+                                instructions,
+                                approx_tokens=None,
+                                focus_topic="debug_force_compress",
+                            )
+                            if isinstance(compressed_history, list):
+                                conversation_history = compressed_history
+                            if isinstance(compressed_system, str):
+                                instructions = compressed_system
+                    kwargs: dict[str, Any] = dict(
+                        task_id=session.session_id,
+                        stream_callback=stream_callback,
+                    )
+                    if instructions:
+                        kwargs["system_message"] = instructions
+                    if conversation_history is not None:
+                        kwargs["conversation_history"] = conversation_history
+                    result = session.agent.run_conversation(
+                        message,
+                        **kwargs,
+                    )
+                    result = _jsonable(result if isinstance(result, dict) else {"value": result})
+                    self._sync_result_tail_to_session_db(
+                        session,
+                        result,
+                        conversation_history,
+                        profile,
+                        db_count_after_prepersist,
+                    )
+                    with session.lock:
+                        if isinstance(result.get("messages"), list):
+                            session.history = result["messages"]
+                        record.status = "interrupted" if result.get("interrupted") else "complete"
+                        record.result = result
+                        record.ended_at = time.time()
+                        session.running = False
+                        session.current_run_id = None
+                        session.last_used_at = time.time()
+                except Exception as exc:
+                    with session.lock:
+                        record.status = "error"
+                        record.error = str(exc)
+                        record.result = {"error": str(exc), "traceback": traceback.format_exc()}
+                        record.ended_at = time.time()
+                        session.running = False
+                        session.current_run_id = None
+                        session.last_used_at = time.time()
+                finally:
+                    try:
+                        from tools.terminal_tool import set_approval_callback
+
+                        set_approval_callback(previous_approval_callback)
                     except Exception:
                         pass
-                if previous_exec_ask is None:
-                    os.environ.pop("HERMES_EXEC_ASK", None)
-                else:
-                    os.environ["HERMES_EXEC_ASK"] = previous_exec_ask
+                    if approval_session_token is not None:
+                        try:
+                            from tools.approval import reset_current_session_key, unregister_gateway_notify
+
+                            if registered_gateway_approval_session is not None:
+                                unregister_gateway_notify(registered_gateway_approval_session)
+                            reset_current_session_key(approval_session_token)
+                        except Exception:
+                            pass
+                    if previous_exec_ask is None:
+                        os.environ.pop("HERMES_EXEC_ASK", None)
+                    else:
+                        os.environ["HERMES_EXEC_ASK"] = previous_exec_ask
 
     def interrupt(self, session_id: str, message: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -1161,6 +1274,8 @@ class BridgeServer:
             instructions = req.get("instructions") or req.get("system_message")
             conversation_history = req.get("conversation_history")
             profile = req.get("profile")
+            model = req.get("model")
+            provider = req.get("provider")
             record = self.pool.start_chat(
                 session_id,
                 message,
@@ -1169,6 +1284,8 @@ class BridgeServer:
                 conversation_history,
                 profile,
                 bool(req.get("force_compress")),
+                model,
+                provider,
             )
             if req.get("wait"):
                 timeout = float(req.get("timeout", 0) or 0)
