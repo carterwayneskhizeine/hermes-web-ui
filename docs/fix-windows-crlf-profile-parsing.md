@@ -72,13 +72,12 @@ hermes CLI 的 `print()` 在 Windows 上输出 CRLF (`\r\n`)。`child_process.ex
 
 合并上游时如果改到这些文件需特别留意，**不要被上游版本覆盖**：
 
-- **`packages/server/src/services/gateway-bootstrap.ts`**
-  Windows 上 `initGatewayManager()` **不调用** `gatewayManager.startAll()`。
-  原因：Windows 没有 `systemd`/`launchd`，gateway 改用前台 `gateway run` 模式，由用户/UI 显式启动；启动时自动 `startAll()` 会与之冲突。
-  > 上游每次回写 `await gatewayManager.startAll()` 都要在合并时删掉。
+- **`packages/server/src/services/hermes/gateway-autostart.ts`**（2026-05-21 后）
+  上游在 v0.5.30 将 `gateway-bootstrap.ts` 重构为此文件，原生加入了 `process.platform === 'win32'` 检测，自动使用 `gateway run` 模式。不再需要手动删除 `startAll()` 调用。
+  > `shouldUseManagedGatewayRunForAutostart()` 函数**不包含** win32 检测，这是有意为之——Windows 不自动启动所有 gateway。
 
 - **`packages/server/src/services/hermes/gateway-manager.ts`**
-  Windows 分支使用 `gateway run` 模式而非 `gateway start --daemon`；进程终止用 `taskkill /F /PID` 替代 `SIGTERM`。
+  Windows 分支使用 `gateway run` 模式而非 `gateway start --daemon`；进程终止用 `taskkill /F /PID` 替代 `SIGTERM`（上游已整合）。
 
 - **`packages/server/src/routes/hermes/terminal.ts`**
   Windows 下的 shell 探测顺序：Git Bash → PowerShell → cmd。
@@ -107,10 +106,11 @@ git merge upstream/main --no-edit
 
 | 文件 | 冲突类型 | 处理方式 |
 |------|----------|----------|
-| `packages/server/src/services/gateway-bootstrap.ts` | 上游恢复 `startAll()` 调用 | **保留 HEAD**：删除 `await gatewayManager.startAll()` 这行 |
+| `packages/server/src/services/hermes/gateway-autostart.ts` | 上游修改了 Windows gateway 逻辑 | 确认 `shouldUseManagedGatewayRun()` 仍包含 `process.platform === 'win32'` |
 | `packages/server/src/services/hermes/gateway-manager.ts` | 上游改了 gateway 启动逻辑 | 谨慎合并——保留 Windows 分支的 `gateway run` 模式与 `taskkill` |
 | `packages/server/src/services/hermes/hermes-cli.ts` | 上游改了解析函数 | 保留 CRLF 规范化（方案 A），把上游的功能改动叠加在规范化之后 |
 | `packages/server/src/routes/hermes/terminal.ts` | 上游改了终端逻辑 | 保留 Windows shell 探测分支 |
+| `README.md` | 端口说明不同 | 保留 Windows 端口 8649 |
 | `vite.config.ts` / `package.json` / `nodemon.json` | 端口/依赖/路径冲突 | 保留 Windows 配置 |
 
 ### 合并后必做的验证
@@ -120,11 +120,11 @@ git merge upstream/main --no-edit
    grep -nE "split\(/\\\\r\\?\\\\n/\)|replace\(/\\\\r" packages/server/src/services/hermes/hermes-cli.ts packages/server/src/services/hermes/gateway-manager.ts
    ```
    应能找到匹配。
-2. **`startAll()` 未被恢复**：
+2. **`gateway-autostart.ts` 含 Windows 检测**：
    ```powershell
-   grep -n "startAll" packages/server/src/services/gateway-bootstrap.ts
+   grep -n "win32" packages/server/src/services/hermes/gateway-autostart.ts
    ```
-   应**无输出**。
+   应能在 `shouldUseManagedGatewayRun()` 中找到 `process.platform === 'win32'`。
 3. **本文档仍存在**：`git ls-files docs/fix-windows-crlf-profile-parsing.md`
 4. **Windows 三个提交仍在历史里**：
    ```powershell
@@ -159,5 +159,6 @@ git commit --no-edit       # 使用 git 生成的默认 merge 信息即可
 | 2026-05-16 | `d16251c` | `7d7c8b7` | 86 个提交，冲突仅 `gateway-bootstrap.ts`（上游恢复了 `startAll()`，已删除） |
 | 2026-05-17 | `7f96b7b` | `bbfd818` | 16 个提交，无冲突，自动合并；新增诊断字段、xAI OAuth、session bridge 等功能 |
 | 2026-05-18 | — | — | 发现上游重写 `nodemon.json` 导致 `HERMES_BIN` 丢失（`spawn hermes ENOENT`），已手动补回；更新本文档并新增验证步骤 5 |
+| 2026-05-21 | `39bed46` | `40109e9` | 19 个提交，冲突 2 处：`README.md`（保留 Windows 端口 8649）、`gateway-bootstrap.ts`（上游完全重构为 `gateway-autostart.ts`，接受删除）；上游新增 `process.platform === 'win32'` 原生支持，CRLF 修复已整合；`nodemon.json` 的 `HERMES_BIN` 通过 git 保留 |
 
 > 下次合并请追加一行。
