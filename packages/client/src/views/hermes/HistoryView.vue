@@ -10,7 +10,8 @@ import { getSourceLabel } from '@/shared/session-display'
 import { copyToClipboard } from '@/utils/clipboard'
 import HistoryMessageList from '@/components/hermes/chat/HistoryMessageList.vue'
 import SessionListItem from '@/components/hermes/chat/SessionListItem.vue'
-import { fetchHermesSessions, fetchHermesSession, type SessionSummary } from '@/api/hermes/sessions'
+import OutlinePanel from '@/components/hermes/chat/OutlinePanel.vue'
+import { deleteSession, fetchHermesSessions, fetchHermesSession, type SessionSummary } from '@/api/hermes/sessions'
 
 const chatStore = useChatStore()
 const appStore = useAppStore()
@@ -26,6 +27,7 @@ const hermesSessionsLoaded = ref(false)
 // History page's own selected session (independent from chatStore)
 const historySessionId = ref<string | null>(null)
 const historySession = ref<Session | null>(null)
+const showOutline = ref(false)
 
 async function loadHermesSessions() {
   if (hermesSessionsLoading.value) return
@@ -130,11 +132,13 @@ const collapsedGroups = ref<Set<string>>(new Set(JSON.parse(localStorage.getItem
 function sessionSummaryToSession(summary: SessionSummary): Session {
   return {
     id: summary.id,
+    profile: summary.profile,
     title: summary.title || '',
     source: summary.source,
     createdAt: summary.started_at * 1000,
     updatedAt: (summary.last_active || summary.started_at) * 1000,
     model: summary.model,
+    provider: summary.provider,
     messageCount: summary.message_count,
     inputTokens: summary.input_tokens,
     outputTokens: summary.output_tokens,
@@ -267,6 +271,26 @@ async function copySessionId(id?: string) {
   }
 }
 
+async function handleDeleteSession(id: string) {
+  const ok = await deleteSession(id)
+  if (!ok) {
+    message.error(t('common.deleteFailed'))
+    return
+  }
+
+  sessionBrowserPrefsStore.removePinned(id)
+  hermesSessions.value = hermesSessions.value.filter(s => s.id !== id)
+
+  if (historySessionId.value === id) {
+    historySessionId.value = null
+    historySession.value = null
+    const next = historySessions.value[0]
+    if (next) await handleSessionClick(next.id)
+  }
+
+  message.success(t('chat.sessionDeleted'))
+}
+
 </script>
 
 <template>
@@ -299,9 +323,11 @@ async function copySessionId(id?: string) {
             :session="s"
             :active="s.id === historySessionId"
             :pinned="true"
-            :can-delete="false"
+            :can-delete="true"
             :streaming="false"
+            :show-profile="false"
             @select="handleSessionClick(s.id)"
+            @delete="handleDeleteSession(s.id)"
           />
         </template>
 
@@ -318,9 +344,11 @@ async function copySessionId(id?: string) {
               :session="s"
               :active="s.id === historySessionId"
               :pinned="false"
-              :can-delete="false"
+              :can-delete="true"
               :streaming="false"
+              :show-profile="false"
               @select="handleSessionClick(s.id)"
+              @delete="handleDeleteSession(s.id)"
             />
           </template>
         </template>
@@ -342,6 +370,16 @@ async function copySessionId(id?: string) {
         <div class="header-actions">
           <NTooltip trigger="hover">
             <template #trigger>
+              <NButton quaternary size="small" @click="showOutline = !showOutline" circle>
+                <template #icon>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+                </template>
+              </NButton>
+            </template>
+            {{ t('chat.outlineTitle') }}
+          </NTooltip>
+          <NTooltip trigger="hover">
+            <template #trigger>
               <NButton quaternary size="small" @click="copySessionId()" circle>
                 <template #icon>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -353,7 +391,12 @@ async function copySessionId(id?: string) {
         </div>
       </header>
 
-      <HistoryMessageList :session="historySession" />
+      <div class="history-content-wrapper">
+        <div class="history-main-content">
+          <HistoryMessageList :session="historySession" />
+        </div>
+        <OutlinePanel v-if="showOutline && historySession" :messages="historySession.messages || []" />
+      </div>
     </div>
   </div>
 </template>
@@ -365,6 +408,21 @@ async function copySessionId(id?: string) {
   display: flex;
   height: 100%;
   position: relative;
+}
+
+.history-content-wrapper {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+
+.history-main-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .session-list {
@@ -388,7 +446,7 @@ async function copySessionId(id?: string) {
     left: 0;
     top: 0;
     height: 100%;
-    z-index: 10;
+    z-index: 120;
     background: $bg-card;
     box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
     width: 280px;
@@ -409,7 +467,7 @@ async function copySessionId(id?: string) {
     position: absolute;
     inset: 0;
     background: rgba(0, 0, 0, 0.4);
-    z-index: 9;
+    z-index: 110;
     opacity: 0;
     pointer-events: none;
     transition: opacity $transition-fast;

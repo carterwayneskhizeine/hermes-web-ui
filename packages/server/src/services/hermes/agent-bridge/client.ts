@@ -1,13 +1,23 @@
 import { setTimeout as delay } from 'timers/promises'
 import { createConnection, type Socket } from 'net'
+import { tmpdir } from 'os'
 import { URL } from 'url'
 import { join } from 'path'
 import { bridgeLogger } from '../../logger'
 import { getActiveProfileName, getProfileDir } from '../hermes-profile'
 
-export const DEFAULT_AGENT_BRIDGE_ENDPOINT = process.platform === 'win32'
-  ? 'tcp://127.0.0.1:18765'
-  : 'ipc:///tmp/hermes-agent-bridge.sock'
+function resolveDefaultAgentBridgeEndpoint(): string {
+  if (process.env.VITEST) {
+    return process.platform === 'win32'
+      ? `tcp://127.0.0.1:${28000 + (process.pid % 10000)}`
+      : `ipc://${join(tmpdir(), `hermes-agent-bridge-test-${process.pid}.sock`)}`
+  }
+  return process.platform === 'win32'
+    ? 'tcp://127.0.0.1:18765'
+    : 'ipc:///tmp/hermes-agent-bridge.sock'
+}
+
+export const DEFAULT_AGENT_BRIDGE_ENDPOINT = resolveDefaultAgentBridgeEndpoint()
 export const DEFAULT_AGENT_BRIDGE_TIMEOUT_MS = 120000
 
 function envPositiveInt(name: string): number | undefined {
@@ -22,10 +32,12 @@ export type AgentBridgeStatus = 'running' | 'complete' | 'interrupted' | 'error'
 export interface AgentBridgeOptions {
   endpoint?: string
   timeoutMs?: number
+  connectRetryMs?: number
 }
 
 export interface AgentBridgeRequestOptions {
   timeoutMs?: number
+  serialize?: boolean
 }
 
 export interface AgentBridgeChatOptions {
@@ -33,6 +45,9 @@ export interface AgentBridgeChatOptions {
   storage_message?: AgentBridgeMessage
   model?: string
   provider?: string
+  source?: string
+  wait?: boolean
+  timeout?: number
 }
 
 export type AgentBridgeMessage =
@@ -94,11 +109,13 @@ export class AgentBridgeError extends Error {
 export class AgentBridgeClient {
   readonly endpoint: string
   readonly timeoutMs: number
+  readonly connectRetryMs: number
   private lock: Promise<unknown> = Promise.resolve()
 
   constructor(options: AgentBridgeOptions = {}) {
     this.endpoint = options.endpoint || process.env.HERMES_AGENT_BRIDGE_ENDPOINT || DEFAULT_AGENT_BRIDGE_ENDPOINT
     this.timeoutMs = options.timeoutMs ?? envPositiveInt('HERMES_AGENT_BRIDGE_TIMEOUT_MS') ?? DEFAULT_AGENT_BRIDGE_TIMEOUT_MS
+    this.connectRetryMs = options.connectRetryMs ?? envPositiveInt('HERMES_AGENT_BRIDGE_CONNECT_RETRY_MS') ?? 5000
   }
 
   private summarizePayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -158,7 +175,7 @@ export class AgentBridgeClient {
     return undefined
   }
 
-  private connectSocket(): Promise<Socket> {
+  private connectSocketOnce(): Promise<Socket> {
     return new Promise((resolveConnect, rejectConnect) => {
       const endpoint = this.endpoint
       let socket: Socket
@@ -191,6 +208,25 @@ export class AgentBridgeClient {
       socket.once('connect', onConnect)
       socket.once('error', onError)
     })
+  }
+
+  private isRetryableConnectError(err: any): boolean {
+    const code = String(err?.code || '')
+    return ['ECONNREFUSED', 'ENOENT', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(code)
+  }
+
+  private async connectSocket(): Promise<Socket> {
+    const deadline = Date.now() + Math.max(0, this.connectRetryMs)
+    for (;;) {
+      try {
+        return await this.connectSocketOnce()
+      } catch (err) {
+        if (!this.isRetryableConnectError(err) || Date.now() >= deadline) {
+          throw err
+        }
+        await delay(100)
+      }
+    }
   }
 
   private readResponse(socket: Socket, timeoutMs: number): Promise<string> {
@@ -298,6 +334,10 @@ export class AgentBridgeClient {
       }
     }
 
+    if (!options.serialize) {
+      return run()
+    }
+
     const next = this.lock.then(run, run)
     this.lock = next.catch(() => undefined)
     return next
@@ -325,6 +365,9 @@ export class AgentBridgeClient {
       ...(profile ? { profile } : {}),
       ...(options.model ? { model: options.model } : {}),
       ...(options.provider ? { provider: options.provider } : {}),
+      ...(options.source ? { source: options.source } : {}),
+      ...(options.wait ? { wait: true } : {}),
+      ...(options.timeout ? { timeout: options.timeout } : {}),
       ...(options.force_compress ? { force_compress: true } : {}),
     })
   }
@@ -383,12 +426,22 @@ export class AgentBridgeClient {
     return this.request<AgentBridgeRunResult>({ action: 'get_result', run_id: runId }, options)
   }
 
-  interrupt(sessionId: string, message?: string): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'interrupt', session_id: sessionId, message })
+  interrupt(sessionId: string, message?: string, profile?: string): Promise<AgentBridgeResponse> {
+    return this.request({
+      action: 'interrupt',
+      session_id: sessionId,
+      message,
+      ...(profile ? { profile } : {}),
+    })
   }
 
-  steer(sessionId: string, text: string): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'steer', session_id: sessionId, text })
+  steer(sessionId: string, text: string, profile?: string): Promise<AgentBridgeResponse> {
+    return this.request({
+      action: 'steer',
+      session_id: sessionId,
+      text,
+      ...(profile ? { profile } : {}),
+    })
   }
 
   approvalRespond(approvalId: string, choice: string): Promise<AgentBridgeResponse> {
@@ -407,15 +460,27 @@ export class AgentBridgeClient {
   }
 
   destroyAll(): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'destroy_all' })
+    return this.request({ action: 'destroy_all' }, { serialize: true })
   }
 
-  getHistory(sessionId: string): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'get_history', session_id: sessionId })
+  destroyProfile(profile: string): Promise<AgentBridgeResponse> {
+    return this.request({ action: 'destroy_profile', profile }, { serialize: true })
   }
 
-  destroy(sessionId: string): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'destroy', session_id: sessionId })
+  getHistory(sessionId: string, profile?: string): Promise<AgentBridgeResponse> {
+    return this.request({
+      action: 'get_history',
+      session_id: sessionId,
+      ...(profile ? { profile } : {}),
+    })
+  }
+
+  destroy(sessionId: string, profile?: string): Promise<AgentBridgeResponse> {
+    return this.request({
+      action: 'destroy',
+      session_id: sessionId,
+      ...(profile ? { profile } : {}),
+    })
   }
 
   list(): Promise<AgentBridgeResponse> {
@@ -423,7 +488,7 @@ export class AgentBridgeClient {
   }
 
   shutdown(): Promise<AgentBridgeResponse> {
-    return this.request({ action: 'shutdown' })
+    return this.request({ action: 'shutdown' }, { serialize: true })
   }
 }
 

@@ -30,6 +30,22 @@ export interface ChatMessage {
     senderName: string
     content: string
     timestamp: number
+    role?: string
+    tool_call_id?: string | null
+    tool_calls?: any[] | null
+    tool_name?: string | null
+    finish_reason?: string | null
+    reasoning?: string | null
+    reasoning_details?: string | null
+    reasoning_content?: string | null
+    isStreaming?: boolean
+    toolName?: string
+    toolCallId?: string
+    toolArgs?: string
+    toolPreview?: string
+    toolResult?: string
+    toolStatus?: 'running' | 'done' | 'error'
+    attachments?: Array<{ id: string; name: string; type: string; size: number; url: string }>
 }
 
 export interface MemberInfo {
@@ -170,7 +186,7 @@ export async function listAgents(roomId: string): Promise<{ agents: RoomAgent[] 
     return request(`/api/hermes/group-chat/rooms/${roomId}/agents`)
 }
 
-export async function removeAgent(roomId: string, agentId: string): Promise<void> {
+export async function removeAgent(roomId: string, agentId: string): Promise<{ success: boolean; agents: RoomAgent[]; members: MemberInfo[] }> {
     return request(`/api/hermes/group-chat/rooms/${roomId}/agents/${agentId}`, {
         method: 'DELETE',
     })

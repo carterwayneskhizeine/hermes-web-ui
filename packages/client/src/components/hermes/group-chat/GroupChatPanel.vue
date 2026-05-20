@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage, NInput, NButton, NSpace, NSelect, NPopover, NPopconfirm, NInputNumber } from 'naive-ui'
-import multiavatar from '@multiavatar/multiavatar'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { updateRoomConfig, forceCompress } from '@/api/hermes/group-chat'
 import GroupMessageList from './GroupMessageList.vue'
 import GroupChatInput from './GroupChatInput.vue'
+import ProfileAvatar from '@/components/hermes/profiles/ProfileAvatar.vue'
+import type { Attachment } from '@/stores/hermes/chat'
+import type { RoomAgent } from '@/api/hermes/group-chat'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -32,16 +34,17 @@ const profileOptions = computed(() =>
     profilesStore.profiles.map(p => ({ label: p.name, value: p.name }))
 )
 
-const avatarCache = new Map<string, string>()
+function profileAvatarFor(profileName?: string) {
+    if (!profileName) return null
+    return profilesStore.profiles.find(profile => profile.name === profileName)?.avatar || null
+}
 
-function agentAvatarUrl(name: string): string {
-    if (avatarCache.has(name)) return avatarCache.get(name)!
-    const uri = multiavatar(name)
-    avatarCache.set(name, uri)
-    return uri
+function agentAvatarName(agent: RoomAgent): string {
+    return agent.profile || agent.name || agent.agentId
 }
 
 const hasRoom = computed(() => !!store.currentRoomId)
+const visibleApproval = computed(() => store.activePendingApproval)
 
 function formatTokens(tokens: number): string {
     if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k tokens`
@@ -131,9 +134,9 @@ async function handleSelectRoom(roomId: string) {
     }
 }
 
-async function handleSendMessage(content: string) {
+async function handleSendMessage(content: string, attachments?: Attachment[]) {
     try {
-        await store.sendMessage(content)
+        await store.sendMessage(content, attachments)
     } catch (err: any) {
         message.error(err.message)
     }
@@ -143,6 +146,12 @@ async function handleAddAgent() {
     await profilesStore.fetchProfiles()
     showAddAgentModal.value = true
 }
+
+onMounted(() => {
+    if (profilesStore.profiles.length === 0) {
+        void profilesStore.fetchProfiles()
+    }
+})
 
 async function confirmAddAgent() {
     if (!selectedProfile.value || !store.currentRoomId) return
@@ -214,6 +223,22 @@ async function handleRemoveAgent(agentId: string) {
         await store.removeAgentFromRoom(store.currentRoomId, agentId)
     } catch {
         message.error(t('common.deleteFailed'))
+    }
+}
+
+async function handleInterruptAgent(agentName: string) {
+    try {
+        await store.interruptAgent(agentName)
+    } catch (err: any) {
+        message.error(err.message || t('common.saveFailed'))
+    }
+}
+
+async function handleApproval(choice: 'once' | 'session' | 'always' | 'deny') {
+    try {
+        await store.respondApproval(choice)
+    } catch (err: any) {
+        message.error(err.message || t('common.saveFailed'))
     }
 }
 
@@ -293,7 +318,7 @@ watch(() => store.sortedMessages.length, async () => {
                             <div class="avatar-stack-inner">
                                 <!-- User avatar first -->
                                 <span class="avatar-stack-item" :style="{ zIndex: store.agents.length + 1 }">
-                                    <span class="agent-avatar" v-html="agentAvatarUrl(store.userName || store.userId)" />
+                                    <ProfileAvatar class="agent-avatar" :name="store.userName || store.userId" :size="28" />
                                 </span>
                                 <span
                                     v-for="(agent, index) in store.agents.slice(-4)"
@@ -301,14 +326,14 @@ watch(() => store.sortedMessages.length, async () => {
                                     class="avatar-stack-item"
                                     :style="{ zIndex: store.agents.length - index }"
                                 >
-                                    <span class="agent-avatar" v-html="agentAvatarUrl(agent.name)" />
+                                    <ProfileAvatar class="agent-avatar" :name="agentAvatarName(agent)" :avatar="profileAvatarFor(agent.profile)" :size="28" />
                                 </span>
                                 <span v-if="store.agents.length > 4" class="avatar-stack-more">+{{ store.agents.length - 4 }}</span>
                             </div>
                         </template>
                         <div class="agent-popover">
                             <div class="agent-popover-item" style="margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--n-border-color, #efeff5);">
-                                <span class="agent-avatar" v-html="agentAvatarUrl(store.userName || store.userId)" />
+                                <ProfileAvatar class="agent-avatar" :name="store.userName || store.userId" :size="28" />
                                 <div class="agent-popover-info">
                                     <span class="agent-popover-name">{{ store.userName || 'You' }}</span>
                                     <span class="agent-popover-profile">{{ t('groupChat.you') }}</span>
@@ -316,7 +341,7 @@ watch(() => store.sortedMessages.length, async () => {
                             </div>
                             <div class="agent-popover-title">{{ t('groupChat.agents') }} ({{ store.agents.length }})</div>
                             <div v-for="agent in store.agents" :key="agent.id" class="agent-popover-item">
-                                <span class="agent-avatar" v-html="agentAvatarUrl(agent.name)" />
+                                <ProfileAvatar class="agent-avatar" :name="agentAvatarName(agent)" :avatar="profileAvatarFor(agent.profile)" :size="28" />
                                 <div class="agent-popover-info">
                                     <span class="agent-popover-name">{{ agent.name }}</span>
                                     <span class="agent-popover-profile">{{ agent.profile }}</span>
@@ -330,7 +355,7 @@ watch(() => store.sortedMessages.length, async () => {
                     <!-- Only user avatar, no agents -->
                     <div v-else-if="store.userName" class="avatar-stack-inner">
                         <span class="avatar-stack-item">
-                            <span class="agent-avatar" v-html="agentAvatarUrl(store.userName || store.userId)" />
+                            <ProfileAvatar class="agent-avatar" :name="store.userName || store.userId" :size="28" />
                         </span>
                     </div>
                     <button class="icon-btn" :title="t('groupChat.addAgent')" @click="handleAddAgent">
@@ -370,6 +395,12 @@ watch(() => store.sortedMessages.length, async () => {
                             <span v-else>
                                 @{{ status.agentName }} {{ t('groupChat.agentReplying') }}
                             </span>
+                            <button class="context-stop-btn" :title="t('common.cancel')" @click="handleInterruptAgent(status.agentName)">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                </svg>
+                            </button>
                         </div>
                     </div>
                     <div v-else-if="store.typingText" class="typing-indicator">
@@ -377,6 +408,38 @@ watch(() => store.sortedMessages.length, async () => {
                             <span /><span /><span />
                         </span>
                         {{ store.typingText }}
+                    </div>
+                </div>
+                <div v-if="visibleApproval" class="approval-bar">
+                    <div class="approval-icon" aria-hidden="true">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+                            <path d="m9 12 2 2 4-4" />
+                        </svg>
+                    </div>
+                    <div class="approval-content">
+                        <div class="approval-main">
+                            <div class="approval-kicker">{{ t('chat.approvalKicker') }}</div>
+                            <div class="approval-title">
+                                <span v-if="visibleApproval.agentName">@{{ visibleApproval.agentName }} · </span>{{ t('chat.approvalTitle') }}
+                            </div>
+                            <div class="approval-desc">{{ visibleApproval.description }}</div>
+                            <code class="approval-command">{{ visibleApproval.command }}</code>
+                        </div>
+                        <div class="approval-actions">
+                            <NButton v-if="visibleApproval.choices.includes('once')" size="small" type="primary" @click="handleApproval('once')">
+                                {{ t('chat.approvalAllowOnce') }}
+                            </NButton>
+                            <NButton v-if="visibleApproval.choices.includes('session')" size="small" secondary @click="handleApproval('session')">
+                                {{ t('chat.approvalAllowSession') }}
+                            </NButton>
+                            <NButton v-if="visibleApproval.choices.includes('always')" size="small" secondary @click="handleApproval('always')">
+                                {{ t('chat.approvalAlways') }}
+                            </NButton>
+                            <NButton v-if="visibleApproval.choices.includes('deny')" size="small" type="error" secondary @click="handleApproval('deny')">
+                                {{ t('chat.approvalDeny') }}
+                            </NButton>
+                        </div>
                     </div>
                 </div>
                 <GroupChatInput @send="handleSendMessage" />
@@ -582,6 +645,143 @@ export default defineComponent({ components: { CreateRoomForm } })
 
     .dark & {
         background-color: rgba(255, 255, 255, 0.06);
+    }
+}
+
+.context-stop-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border: 1px solid rgba(var(--error-rgb), 0.18);
+    border-radius: $radius-sm;
+    background: rgba(var(--error-rgb), 0.06);
+    color: $error;
+    cursor: pointer;
+    padding: 0;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+
+    &:hover {
+        color: #ffffff;
+        background: $error;
+        border-color: $error;
+    }
+}
+
+.approval-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0 16px 12px;
+    padding: 12px;
+    border: 1px solid $border-color;
+    border-radius: 8px;
+    background: $bg-card;
+    box-shadow: none;
+}
+
+.approval-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    color: var(--accent-primary);
+    background: rgba(var(--accent-primary-rgb), 0.12);
+    border: 1px solid rgba(var(--accent-primary-rgb), 0.2);
+    border-radius: 8px;
+}
+
+.approval-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.approval-main {
+    min-width: 0;
+}
+
+.approval-kicker {
+    margin-bottom: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-primary);
+}
+
+.approval-title {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.3;
+    color: $text-primary;
+}
+
+.approval-desc {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: $text-secondary;
+}
+
+.approval-command {
+    display: block;
+    margin-top: 8px;
+    max-height: 96px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: $text-primary;
+    background: $bg-secondary;
+    border: 1px solid $border-color;
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
+.approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid $border-color;
+}
+
+@media (max-width: 768px) {
+    .approval-bar {
+        margin: 0 10px 10px;
+        padding: 10px;
+    }
+
+    .approval-icon {
+        flex-basis: 28px;
+        width: 28px;
+        height: 28px;
+    }
+
+    .approval-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .approval-actions :deep(.n-button) {
+        width: 100%;
+    }
+}
+
+@media (max-width: 420px) {
+    .approval-bar {
+        gap: 8px;
+    }
+
+    .approval-actions {
+        grid-template-columns: 1fr;
     }
 }
 
