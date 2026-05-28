@@ -9,6 +9,34 @@ export interface HealthResponse {
   node_version?: string
 }
 
+export interface PreviewTag {
+  name: string
+  sha: string
+}
+
+export interface PreviewStatus {
+  preview_dir: string
+  exists: boolean
+  has_package: boolean
+  installed: boolean
+  running: boolean
+  pid: number | null
+  current_tag: string
+  frontend_url: string
+  agent_bridge_endpoint: string
+  log_path: string
+  webui_home: string
+  action_log_path: string
+  dev_log_path: string
+  action_log: string
+  dev_log: string
+}
+
+export interface PreviewActionResponse extends PreviewStatus {
+  success: boolean
+  message?: string
+}
+
 // Config-based model types
 export interface ModelInfo {
   id: string
@@ -31,6 +59,7 @@ export interface ModelVisibilityRule {
 }
 
 export type ModelVisibility = Record<string, ModelVisibilityRule>
+export type CustomModels = Record<string, string[]>
 
 export interface AvailableModelGroup {
   provider: string   // credential pool key (e.g. "zai", "custom:subrouter.ai")
@@ -41,6 +70,8 @@ export interface AvailableModelGroup {
   available_models?: string[]
   api_key: string
   builtin?: boolean
+  /** Env var used by Hermes to override this provider's base URL. If present, the preset URL is editable. */
+  base_url_env?: string
   /** 可选：模型 ID -> 元数据（preview/disabled/alias）。alias 仅用于 Web UI 展示。 */
   model_meta?: Record<string, { preview?: boolean; disabled?: boolean; alias?: string }>
 }
@@ -61,6 +92,7 @@ export interface AvailableModelsResponse {
   /** Web UI-only display aliases keyed by provider -> canonical model ID. */
   model_aliases?: Record<string, Record<string, string>>
   model_visibility?: ModelVisibility
+  custom_models?: CustomModels
 }
 
 export interface CustomProvider {
@@ -78,6 +110,36 @@ export async function checkHealth(): Promise<HealthResponse> {
 
 export async function triggerUpdate(): Promise<{ success: boolean; message: string }> {
   return request<{ success: boolean; message: string }>('/api/hermes/update', { method: 'POST' })
+}
+
+export async function fetchPreviewStatus(): Promise<PreviewStatus> {
+  return request<PreviewStatus>('/api/hermes/update/preview')
+}
+
+export async function fetchPreviewTags(): Promise<{ tags: PreviewTag[] }> {
+  return request<{ tags: PreviewTag[] }>('/api/hermes/update/preview/tags')
+}
+
+export async function preparePreview(tag: string): Promise<PreviewActionResponse> {
+  return request<PreviewActionResponse>('/api/hermes/update/preview/prepare', {
+    method: 'POST',
+    body: JSON.stringify({ tag }),
+  })
+}
+
+export async function installPreview(): Promise<PreviewActionResponse> {
+  return request<PreviewActionResponse>('/api/hermes/update/preview/install', { method: 'POST' })
+}
+
+export async function startPreview(tag?: string): Promise<PreviewActionResponse> {
+  return request<PreviewActionResponse>('/api/hermes/update/preview/start', {
+    method: 'POST',
+    body: JSON.stringify({ tag }),
+  })
+}
+
+export async function stopPreview(): Promise<PreviewActionResponse> {
+  return request<PreviewActionResponse>('/api/hermes/update/preview/stop', { method: 'POST' })
 }
 
 export async function fetchConfigModels(): Promise<ConfigModelsResponse> {
@@ -161,5 +223,27 @@ export async function updateModelVisibility(data: {
   return request<{ success: boolean; model_visibility: ModelVisibility }>('/api/hermes/model-visibility', {
     method: 'PUT',
     body: JSON.stringify(data),
+  })
+}
+
+export async function addCustomModel(data: {
+  provider: string
+  model: string
+}): Promise<{ success: boolean; custom_models: CustomModels }> {
+  return request<{ success: boolean; custom_models: CustomModels }>('/api/hermes/custom-model', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  })
+}
+
+export async function removeCustomModel(data: {
+  provider: string
+  model: string
+}): Promise<{ success: boolean; custom_models: CustomModels }> {
+  const params = new URLSearchParams()
+  params.set('provider', data.provider)
+  params.set('model', data.model)
+  return request<{ success: boolean; custom_models: CustomModels }>(`/api/hermes/custom-model?${params.toString()}`, {
+    method: 'DELETE',
   })
 }

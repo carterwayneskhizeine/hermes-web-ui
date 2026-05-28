@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage, NInput, NButton, NSpace, NSelect, NPopover, NPopconfirm, NInputNumber } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { useMessage, NInput, NButton, NSpace, NSelect, NPopover, NPopconfirm, NInputNumber, NDropdown, type DropdownOption } from 'naive-ui'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { updateRoomConfig, forceCompress } from '@/api/hermes/group-chat'
 import GroupMessageList from './GroupMessageList.vue'
 import GroupChatInput from './GroupChatInput.vue'
 import ProfileAvatar from '@/components/hermes/profiles/ProfileAvatar.vue'
+import { copyToClipboard } from '@/utils/clipboard'
 import type { Attachment } from '@/stores/hermes/chat'
 import type { RoomAgent } from '@/api/hermes/group-chat'
 
 const { t } = useI18n()
+const router = useRouter()
 const message = useMessage()
 const store = useGroupChatStore()
 const profilesStore = useProfilesStore()
@@ -29,6 +32,10 @@ const agentDescription = ref('')
 const cloneSourceRoomId = ref<string | null>(null)
 const cloneRoomName = ref('')
 const cloneInviteCode = ref('')
+const contextRoomId = ref<string | null>(null)
+const showRoomContextMenu = ref(false)
+const roomContextMenuX = ref(0)
+const roomContextMenuY = ref(0)
 
 const profileOptions = computed(() =>
     profilesStore.profiles.map(p => ({ label: p.name, value: p.name }))
@@ -64,13 +71,37 @@ function generateCode(): string {
     return code
 }
 
+function formatAgentFailures(results?: Array<{ ok: boolean; profile: string; error?: string; reason?: string }>): string | null {
+    const failed = results?.filter(result => !result.ok) || []
+    if (failed.length === 0) return null
+    const details = failed.map(result => result.reason || result.error || result.profile).join('; ')
+    return t('groupChat.agentAddFailedCount', { count: failed.length, details })
+}
+
+function extractApiErrorMessage(err: any): string {
+    const raw = err?.message || ''
+    const jsonStart = raw.indexOf('{')
+    if (jsonStart >= 0) {
+        try {
+            const parsed = JSON.parse(raw.slice(jsonStart))
+            if (parsed?.code === 'PROFILE_AGENT_CONNECT_FAILED' && parsed?.error) {
+                return parsed.reason ? `${parsed.error}: ${parsed.reason}` : parsed.error
+            }
+            if (parsed?.error) return parsed.error
+        } catch { /* ignore */ }
+    }
+    return raw || t('common.saveFailed')
+}
+
 async function handleCreateRoom(name: string, inviteCode: string, userName: string, description: string, compression: { triggerTokens: number; maxHistoryTokens: number; tailMessageCount: number }) {
     try {
         store.setUserInfo(userName, description)
         const res = await store.createNewRoom(name, inviteCode, undefined, compression)
         showCreateModal.value = false
-        message.success(t('groupChat.roomCreated'))
-        await store.joinRoom(res.room.id)
+        const failureMessage = formatAgentFailures(res.agentResults)
+        if (failureMessage) message.warning(failureMessage)
+        else message.success(t('groupChat.roomCreated'))
+        await router.push({ name: 'hermes.groupChatRoom', params: { roomId: res.room.id } })
     } catch {
         message.error(t('common.saveFailed'))
     }
@@ -79,9 +110,51 @@ async function handleCreateRoom(name: string, inviteCode: string, userName: stri
 async function handleDeleteRoom(roomId: string) {
     try {
         await store.deleteRoom(roomId)
+        if (store.currentRoomId === roomId) {
+            await router.replace({ name: 'hermes.groupChat' })
+        }
         message.success(t('groupChat.roomDeleted'))
     } catch {
         message.error(t('common.saveFailed'))
+    }
+}
+
+function buildRoomUrl(roomId: string) {
+    const href = router.resolve({ name: 'hermes.groupChatRoom', params: { roomId } }).href
+    return `${window.location.origin}${window.location.pathname}${href}`
+}
+
+async function copyRoomLink(roomId: string) {
+    const ok = await copyToClipboard(buildRoomUrl(roomId))
+    if (ok) message.success(t('common.copied'))
+    else message.error(t('common.copied') + ' ✗')
+}
+
+const roomContextMenuOptions = computed<DropdownOption[]>(() => [
+    { label: t('groupChat.copyRoomLink'), key: 'copy-link' },
+    { label: t('groupChat.cloneRoom'), key: 'clone-room' },
+])
+
+function handleRoomContextMenu(event: MouseEvent, roomId: string) {
+    event.preventDefault()
+    contextRoomId.value = roomId
+    roomContextMenuX.value = event.clientX
+    roomContextMenuY.value = event.clientY
+    showRoomContextMenu.value = true
+}
+
+function handleRoomContextClickOutside() {
+    showRoomContextMenu.value = false
+}
+
+function handleRoomContextSelect(key: string) {
+    showRoomContextMenu.value = false
+    const roomId = contextRoomId.value
+    if (!roomId) return
+    if (key === 'copy-link') {
+        void copyRoomLink(roomId)
+    } else if (key === 'clone-room') {
+        handleOpenCloneRoom(roomId)
     }
 }
 
@@ -104,8 +177,10 @@ async function confirmCloneRoom() {
         cloneSourceRoomId.value = null
         cloneRoomName.value = ''
         cloneInviteCode.value = ''
-        await store.joinRoom(res.room.id)
-        message.success(t('groupChat.roomCloned'))
+        await router.push({ name: 'hermes.groupChatRoom', params: { roomId: res.room.id } })
+        const failureMessage = formatAgentFailures(res.agentResults)
+        if (failureMessage) message.warning(failureMessage)
+        else message.success(t('groupChat.roomCloned'))
     } catch {
         message.error(t('common.saveFailed'))
     }
@@ -127,7 +202,7 @@ async function handleClearRoomContext() {
 
 async function handleSelectRoom(roomId: string) {
     try {
-        await store.joinRoom(roomId)
+        await router.push({ name: 'hermes.groupChatRoom', params: { roomId } })
         if (window.innerWidth <= 768) showSidebar.value = false
     } catch {
         message.error(t('groupChat.joinFailed'))
@@ -170,7 +245,7 @@ async function confirmAddAgent() {
         if (err.message?.includes('already')) {
             message.warning(t('groupChat.agentAlreadyInRoom'))
         } else {
-            message.error(t('common.saveFailed'))
+            message.error(extractApiErrorMessage(err))
         }
     }
 }
@@ -273,6 +348,7 @@ watch(() => store.sortedMessages.length, async () => {
                     class="room-item"
                     :class="{ active: store.currentRoomId === room.id }"
                     @click="handleSelectRoom(room.id)"
+                    @contextmenu="handleRoomContextMenu($event, room.id)"
                 >
                     <svg class="room-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -282,11 +358,6 @@ watch(() => store.sortedMessages.length, async () => {
                         <span v-if="room.inviteCode" class="room-code">{{ room.inviteCode }}</span>
                         <span class="room-tokens">{{ formatTokens(room.totalTokens || 0) }}</span>
                     </div>
-                    <button class="room-action-btn" :title="t('groupChat.cloneRoom')" @click.stop="handleOpenCloneRoom(room.id)">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <rect x="8" y="8" width="12" height="12" rx="2" /><path d="M4 16V6a2 2 0 0 1 2-2h10" />
-                        </svg>
-                    </button>
                     <NPopconfirm @positive-click="handleDeleteRoom(room.id)">
                         <template #trigger>
                             <button class="room-action-btn danger" @click.stop>
@@ -301,6 +372,17 @@ watch(() => store.sortedMessages.length, async () => {
                 </div>
             </div>
         </div>
+
+        <NDropdown
+            placement="bottom-start"
+            trigger="manual"
+            :x="roomContextMenuX"
+            :y="roomContextMenuY"
+            :options="roomContextMenuOptions"
+            :show="showRoomContextMenu"
+            @select="handleRoomContextSelect"
+            @clickoutside="handleRoomContextClickOutside"
+        />
 
         <!-- Main chat area -->
         <div class="chat-main">

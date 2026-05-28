@@ -1,22 +1,18 @@
-import { defineConfig, createLogger } from 'vite'
+import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import type { ProxyOptions } from 'vite'
 import { resolve } from 'path'
 import pkg from './package.json'
 
-const logger = createLogger()
-const originalError = logger.error.bind(logger)
-logger.error = (msg, opts) => {
-  if (typeof msg === 'string' && msg.includes('ECONNREFUSED')) return
-  originalError(msg, opts)
-}
-
-const BACKEND = 'http://127.0.0.1:8648'
+const FRONTEND_PORT = Number(process.env.HERMES_WEB_UI_FRONTEND_PORT || 8649)
+const BACKEND_PORT = process.env.HERMES_WEB_UI_BACKEND_PORT || '8648'
+const BACKEND = `http://127.0.0.1:${BACKEND_PORT}`
 
 function createProxyConfig(): ProxyOptions {
   return {
     target: BACKEND,
     changeOrigin: true,
+    ws: true,
     configure: (proxy) => {
       proxy.on('error', (err: any, _req, res: any) => {
         if (err.code === 'ECONNREFUSED') {
@@ -107,8 +103,8 @@ export default defineConfig({
     ],
   },
   server: {
-    port: 8649,
-    allowedHosts: ['hermes.goldie-rill.top'],
+    port: FRONTEND_PORT,
+    strictPort: true,
     proxy: {
       '/api': createProxyConfig(),
       '/v1': createProxyConfig(),

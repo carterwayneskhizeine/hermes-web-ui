@@ -41,6 +41,12 @@ const isAgent = computed(() => {
     return props.agents.some(a => a.agentId === props.message.senderId || a.name === props.message.senderName)
 })
 
+const isAgentError = computed(() => {
+    if (props.message.role !== 'assistant') return false
+    if (props.message.finish_reason === 'error') return true
+    return /^Error:\s*/i.test(props.message.content || '')
+})
+
 const isSelf = computed(() => {
     return !!props.currentUserId && props.message.senderId === props.currentUserId
 })
@@ -443,6 +449,7 @@ onBeforeUnmount(() => {
                 class="msg-content"
                 :class="{
                     'agent-content': isAgent,
+                    'agent-error': isAgentError,
                     'speech-playing': isPlayingThisMessage && !isPausedThisMessage,
                 }"
             >
@@ -531,6 +538,8 @@ onBeforeUnmount(() => {
     display: flex;
     gap: 10px;
     padding: 2px 0;
+    min-width: 0;
+    max-width: 100%;
 
     &.self {
         flex-direction: row-reverse;
@@ -546,6 +555,20 @@ onBeforeUnmount(() => {
 
     &.agent .msg-content.agent-content {
         background-color: rgba(var(--accent-primary-rgb), 0.06);
+    }
+
+    &.agent .msg-content.agent-error {
+        color: $error;
+        background-color: rgba(var(--error-rgb), 0.06);
+        border: 1px solid rgba(var(--error-rgb), 0.2);
+
+        :deep(.markdown-body),
+        :deep(.markdown-body p),
+        :deep(.markdown-body li),
+        :deep(.markdown-body strong),
+        :deep(.markdown-body code) {
+            color: $error;
+        }
     }
 
     &.self .msg-content {
@@ -565,6 +588,9 @@ onBeforeUnmount(() => {
     border-radius: $radius-sm;
     color: $text-muted;
     font-size: 11px;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
 
     &.expandable {
         cursor: pointer;
@@ -591,17 +617,24 @@ onBeforeUnmount(() => {
 }
 
 .tool-name {
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-width: 0;
     font-family: $font-code;
     color: $text-muted;
     font-weight: 400;
-}
-
-.tool-preview {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 400px;
+}
+
+.tool-preview {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: min(400px, 100%);
 }
 
 .tool-spinner {
@@ -832,6 +865,20 @@ onBeforeUnmount(() => {
             0 0 10px rgba(255, 107, 107, 0.4),
             0 0 20px rgba(255, 107, 107, 0.2);
         animation: rainbow-glow 4s linear infinite;
+    }
+
+    &.agent-error {
+        color: $error;
+        background-color: rgba(var(--error-rgb), 0.06);
+        border: 1px solid rgba(var(--error-rgb), 0.2);
+
+        :deep(.markdown-body),
+        :deep(.markdown-body p),
+        :deep(.markdown-body li),
+        :deep(.markdown-body strong),
+        :deep(.markdown-body code) {
+            color: $error;
+        }
     }
 
     :deep(.mention-highlight) {
