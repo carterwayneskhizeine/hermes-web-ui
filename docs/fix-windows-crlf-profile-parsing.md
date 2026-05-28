@@ -52,17 +52,16 @@ hermes CLI 的 `print()` 在 Windows 上输出 CRLF (`\r\n`)。`child_process.ex
 
 ### 当前已修复的位置
 
-| 文件 | 行（约） | 函数 |
-|------|----------|------|
-| `packages/server/src/services/hermes/hermes-cli.ts` | L73 | `parseSessionExport` |
-| 同上 | L312–313 | `listLogFiles` |
-| 同上 | L392–393 | `listProfiles`（**核心**） |
-| 同上 | L430 | `getProfile`（按 `:` 分割，受影响较小） |
-| `packages/server/src/services/hermes/gateway-manager.ts` | L76, L478, L653, L670 | gateway 状态解析等 |
-| `packages/server/src/services/hermes/agent-bridge/manager.ts` | L78 | bridge 查找 |
-| `packages/server/src/services/hermes/context-engine/gateway-client.ts` | L148 | context engine |
-| `packages/server/src/services/hermes/group-chat/agent-clients.ts` | L422 | group chat |
-| `packages/server/src/services/hermes/run-chat/sse-utils.ts` | L37 | SSE 行解析 |
+| 文件 | 函数 / 位置 | 说明 |
+|------|-------------|------|
+| `packages/server/src/services/hermes/profile-list-parser.ts` | `parseProfileListRuntimeInfo` | **核心**：上游 v0.6.x 新增，内置 CRLF 规范化（方案 A） |
+| `packages/server/src/services/hermes/hermes-cli.ts` | `parseSessionExport` | 方案 A：`replace(/\r\n/g,'\n').replace(/\r/g,'\n')` |
+| 同上 | `listLogFiles` | 同上 |
+| `packages/server/src/services/hermes/gateway-manager.ts` | 多处 | 方案 B：`split(/\r?\n/)` |
+| `packages/server/src/services/hermes/agent-bridge/manager.ts` | 多处 | 方案 B：`split(/\r?\n/)`；Windows netstat 编码已修复 |
+| `packages/server/src/services/hermes/run-chat/sse-utils.ts` | SSE 行解析 | 方案 B |
+| `packages/server/src/services/hermes/hermes-kanban.ts` | kanban | 方案 B |
+| `packages/server/src/services/hermes/ops-monitor.ts` | 系统监控 | 方案 B |
 
 > **新增 hermes CLI 输出解析时，必须使用上面的方案 A 或 B，禁止裸 `.split('\n')`**。
 
@@ -160,5 +159,6 @@ git commit --no-edit       # 使用 git 生成的默认 merge 信息即可
 | 2026-05-17 | `7f96b7b` | `bbfd818` | 16 个提交，无冲突，自动合并；新增诊断字段、xAI OAuth、session bridge 等功能 |
 | 2026-05-18 | — | — | 发现上游重写 `nodemon.json` 导致 `HERMES_BIN` 丢失（`spawn hermes ENOENT`），已手动补回；更新本文档并新增验证步骤 5 |
 | 2026-05-21 | `39bed46` | `40109e9` | 19 个提交，冲突 2 处：`README.md`（保留 Windows 端口 8649）、`gateway-bootstrap.ts`（上游完全重构为 `gateway-autostart.ts`，接受删除）；上游新增 `process.platform === 'win32'` 原生支持，CRLF 修复已整合；`nodemon.json` 的 `HERMES_BIN` 通过 git 保留 |
+| 2026-05-28 | `d41340a` | `e89c192` | ~80 个提交（v0.5.33–v0.6.4），冲突 2 处：`README.md`（保留 BFF 端口 8648）、`vite.config.ts`（接受上游可配置端口 + `strictPort`，移除自定义 logger 和 `allowedHosts`）；上游引入 `profile-list-parser.ts` 已内置 CRLF 规范化；`agent-bridge/manager.ts` Windows netstat 编码已修复；`nodemon.json` 的 `HERMES_BIN` 保留完好 |
 
 > 下次合并请追加一行。
